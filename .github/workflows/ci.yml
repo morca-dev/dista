@@ -301,13 +301,21 @@ jobs:
       - name: Format check
         run: pixi run -e fmt format-check
 
+  # Imports: no cycles between modules, and each name imported from the
+  # module that defines it (github.com/magmalake/customs).
+  customs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: magmalake/customs@v0.2.1
+
   # One check for every Linux job above: each passed, or, for a prose-only
   # PR, was skipped. The jobs' own checks still report too, so the ruleset's
   # stable / ubuntu-latest, nightly / ubuntu-latest and format keep working.
   # (macOS runs only on the nightly, which this gate doesn't cover.)
   ci:
     if: ${{ always() && github.event_name != 'schedule' }}
-    needs: [release, release-check, changes, test, data, kind, fuzz, format]
+    needs: [release, release-check, changes, test, data, kind, fuzz, format, customs]
     runs-on: ubuntu-latest
     steps:
       - env:
