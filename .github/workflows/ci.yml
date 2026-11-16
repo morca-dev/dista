@@ -307,7 +307,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: magmalake/customs@v0.3.0
+      - uses: magmalake/customs@v0.3.1
 
   # One check for every Linux job above: each passed, or, for a prose-only
   # PR, was skipped. The jobs' own checks still report too, so the ruleset's
