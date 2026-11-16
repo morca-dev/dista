@@ -14,7 +14,7 @@ duplicated onto a fixed descriptor, `WAKE_FD`, which the handler writes to.
 
 from std.ffi import c_int, external_call
 
-from dista.socket import fcntl
+from dista.socket import close_fd, fcntl
 
 comptime SIGTERM: c_int = 15
 comptime WAKE_FD: c_int = 250
@@ -54,11 +54,11 @@ def wake_on_sigterm() -> c_int:
         exit_on_sigterm()
         return -1
     if external_call["dup2", c_int](fds[1], WAKE_FD) != WAKE_FD:
-        _ = external_call["close", c_int](fds[0])
-        _ = external_call["close", c_int](fds[1])
+        _ = close_fd(fds[0])
+        _ = close_fd(fds[1])
         exit_on_sigterm()
         return -1
-    _ = external_call["close", c_int](fds[1])
+    _ = close_fd(fds[1])
     _ = external_call["signal", Int](SIGTERM, _wake)
     return fds[0]
 

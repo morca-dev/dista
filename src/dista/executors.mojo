@@ -42,7 +42,7 @@ from threads import (
 
 from dista.client import TaskContext
 from dista.sizing import AUTO, Sizing
-from dista.socket import set_nonblocking, wall_ns
+from dista.socket import close_fd, set_nonblocking, wall_ns
 
 comptime DispatchFn = def(
     UInt64, List[UInt8], mut List[UInt8], mut TaskContext
@@ -331,8 +331,8 @@ struct Executors[dispatch: DispatchFn](Movable):
                 self._threads[k].join()
             except:
                 pass
-        _ = external_call["close", c_int](self._wake_r)
-        _ = external_call["close", c_int](sh.wake_w)
+        _ = close_fd(self._wake_r)
+        _ = close_fd(sh.wake_w)
         _ = self._shared.unsafe_take_pointee()
         self._shared.unsafe_free()
 

@@ -103,11 +103,11 @@ def resolve_ipv4(host: String) raises -> Array[UInt8, 4]:
     var slot = stack_allocation[1, UInt64]()
     slot[] = 0
     var name = host
-    var rc = external_call["getaddrinfo", c_int](
-        name.as_c_string_span(),
-        Optional[Pointer[UInt8, MutUntrackedOrigin]](None),
-        hints.unsafe_bitcast[NoneType](),
-        slot.unsafe_bitcast[NoneType](),
+    var rc = external_call["getaddrinfo", Int32](
+        Int(name.as_c_string_span().ptr()),
+        Int(0),
+        Int(hints),
+        Int(slot),
     )
     if rc != 0 or slot[] == 0:
         raise Error("cannot resolve host ", host, " (getaddrinfo ", rc, ")")
@@ -129,15 +129,48 @@ def resolve_ipv4(host: String) raises -> Array[UInt8, 4]:
     return ip^
 
 
+# The libc calls that Mosaad-M/tcp and tls also declare. Mojo allows one
+# signature per C symbol in a program, so these are declared exactly as tcp
+# does (`Int` addresses, `Int32` ints) and a binary can import both.
+def _send(fd: Int32, buf_addr: Int, length: Int, flags: Int32) -> Int:
+    return external_call["send", Int](fd, buf_addr, length, flags)
+
+
+def _recv(fd: Int32, buf_addr: Int, length: Int, flags: Int32) -> Int:
+    return external_call["recv", Int](fd, buf_addr, length, flags)
+
+
+def _c_connect(fd: Int32, addr: Int, addrlen: Int32) -> Int32:
+    return external_call["connect", Int32](fd, addr, addrlen)
+
+
+def close_fd(fd: Int32) -> Int32:
+    """`close(2)`: the only declaration of it in dista."""
+    return external_call["close", Int32](fd)
+
+
+def _setsockopt(
+    fd: Int32, level: Int32, name: Int32, value: Int, length: Int32
+) -> Int32:
+    return external_call["setsockopt", Int32](fd, level, name, value, length)
+
+
+def _getsockopt(
+    fd: Int32, level: Int32, name: Int32, value: Int, length_addr: Int
+) -> Int32:
+    return external_call["getsockopt", Int32](
+        fd, level, name, value, length_addr
+    )
+
+
+def _c_poll(fds_addr: Int, nfds: Int, timeout_ms: Int32) -> Int32:
+    return external_call["poll", Int32](fds_addr, nfds, timeout_ms)
+
+
 def send_some(fd: c_int, data: Pointer[UInt8, _], size: Int) raises -> Int:
     """Sends what the socket takes without blocking. Returns the bytes sent."""
     while True:
-        var n = external_call["send", c_ssize_t](
-            fd,
-            data.unsafe_bitcast[NoneType](),
-            c_size_t(size),
-            MSG_NOSIGNAL | MSG_DONTWAIT,
-        )
+        var n = _send(fd, Int(data), size, MSG_NOSIGNAL | MSG_DONTWAIT)
         if n >= 0:
             return Int(n)
         var e = get_errno().value
@@ -153,9 +186,7 @@ def recv_some(fd: c_int, buf: Pointer[UInt8, _], size: Int) raises -> Int:
     Returns the bytes read, 0 at end of stream, or -1 if nothing is waiting.
     """
     while True:
-        var n = external_call["recv", c_ssize_t](
-            fd, buf.unsafe_bitcast[NoneType](), c_size_t(size), MSG_DONTWAIT
-        )
+        var n = _recv(fd, Int(buf), size, MSG_DONTWAIT)
         if n >= 0:
             return Int(n)
         var e = get_errno().value
@@ -192,22 +223,12 @@ def _new_socket() raises -> c_int:
         _fail("socket")
     var one = stack_allocation[1, c_int]()
     one[] = 1
-    _ = external_call["setsockopt", c_int](
-        fd, SOL_SOCKET, SO_REUSEADDR, one.unsafe_bitcast[NoneType](), c_uint(4)
-    )
+    _ = _setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, Int(one), c_int(4))
     # Frames are small request/response pairs: without this, Nagle's algorithm
     # and delayed ACKs stall each one for milliseconds.
-    _ = external_call["setsockopt", c_int](
-        fd, IPPROTO_TCP, TCP_NODELAY, one.unsafe_bitcast[NoneType](), c_uint(4)
-    )
+    _ = _setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, Int(one), c_int(4))
     comptime if not CompilationTarget.is_linux():
-        _ = external_call["setsockopt", c_int](
-            fd,
-            SOL_SOCKET,
-            SO_NOSIGPIPE,
-            one.unsafe_bitcast[NoneType](),
-            c_uint(4),
-        )
+        _ = _setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, Int(one), c_int(4))
     set_keepalive(fd)
     return fd
 
@@ -224,9 +245,7 @@ def keepalive_seconds() -> Int:
 def _setopt(fd: c_int, level: c_int, name: c_int, value: Int):
     var v = stack_allocation[1, c_int]()
     v[] = c_int(value)
-    _ = external_call["setsockopt", c_int](
-        fd, level, name, v.unsafe_bitcast[NoneType](), c_uint(4)
-    )
+    _ = _setsockopt(fd, level, name, Int(v), c_int(4))
 
 
 def set_keepalive(fd: c_int):
@@ -259,12 +278,7 @@ def get_int_option(fd: c_int, level: c_int, name: c_int) -> Int:
     v[] = 0
     var len = stack_allocation[1, c_uint]()
     len[] = c_uint(4)
-    if (
-        external_call["getsockopt", c_int](
-            fd, level, name, v.unsafe_bitcast[NoneType](), len
-        )
-        != 0
-    ):
+    if _getsockopt(fd, level, name, Int(v), Int(len)) != 0:
         return -1
     return Int(v[])
 
@@ -301,7 +315,7 @@ def _refuse_self(fd: c_int) raises:
     for i in range(2, 8):
         if mine[i] != theirs[i]:
             return
-    _ = external_call["close", c_int](fd)
+    _ = close_fd(fd)
     raise Error("connect: the socket connected to itself")
 
 
@@ -312,12 +326,7 @@ def socket_error(fd: c_int) -> c_int:
     err[] = 0
     var len = stack_allocation[1, c_uint]()
     len[] = c_uint(4)
-    if (
-        external_call["getsockopt", c_int](
-            fd, SOL_SOCKET, SO_ERROR, err.unsafe_bitcast[NoneType](), len
-        )
-        != 0
-    ):
+    if _getsockopt(fd, SOL_SOCKET, SO_ERROR, Int(err), Int(len)) != 0:
         return get_errno().value
     return err[]
 
@@ -331,25 +340,18 @@ def _connect(
     is a `poll` that can end."""
     var fd = _new_socket()
     _ = set_nonblocking(fd)
-    if (
-        external_call["connect", c_int](
-            fd,
-            addr.unsafe_ptr().unsafe_bitcast[NoneType](),
-            c_uint(SOCKADDR_IN_SIZE),
-        )
-        != 0
-    ):
+    if _c_connect(fd, Int(addr.unsafe_ptr()), c_int(SOCKADDR_IN_SIZE)) != 0:
         var e = get_errno().value
         if e != EINPROGRESS and e != EINTR:
-            _ = external_call["close", c_int](fd)
+            _ = close_fd(fd)
             raise Error(what, " failed: errno ", e)
         var rev = poll([fd], [POLLOUT], timeout_ms)
         if rev[0] == 0:
-            _ = external_call["close", c_int](fd)
+            _ = close_fd(fd)
             raise Error(what, " timed out after ", timeout_ms, " ms")
         var err = socket_error(fd)
         if err != 0:
-            _ = external_call["close", c_int](fd)
+            _ = close_fd(fd)
             raise Error(what, " failed: errno ", err)
     _refuse_self(fd)
     return fd
@@ -407,17 +409,10 @@ struct Stream(Movable):
         var addr = _sockaddr(ip, port)
         var fd = _new_socket()
         _ = set_nonblocking(fd)
-        if (
-            external_call["connect", c_int](
-                fd,
-                addr.unsafe_ptr().unsafe_bitcast[NoneType](),
-                c_uint(SOCKADDR_IN_SIZE),
-            )
-            != 0
-        ):
+        if _c_connect(fd, Int(addr.unsafe_ptr()), c_int(SOCKADDR_IN_SIZE)) != 0:
             var e = get_errno().value
             if e != EINPROGRESS and e != EINTR:
-                _ = external_call["close", c_int](fd)
+                _ = close_fd(fd)
                 raise Error(
                     "connect to ", addr_key(ip, port), " failed: errno ", e
                 )
@@ -452,12 +447,10 @@ struct Stream(Movable):
         """Writes every byte of `data`."""
         var sent = 0
         while sent < len(data):
-            var n = external_call["send", c_ssize_t](
+            var n = _send(
                 self.fd,
-                data.unsafe_ptr()
-                .unsafe_offset(sent)
-                .unsafe_bitcast[NoneType](),
-                c_size_t(len(data) - sent),
+                Int(data.unsafe_ptr().unsafe_offset(sent)),
+                len(data) - sent,
                 MSG_NOSIGNAL,
             )
             if n < 0:
@@ -478,11 +471,8 @@ struct Stream(Movable):
         """
         var got = 0
         while got < size:
-            var n = external_call["recv", c_ssize_t](
-                self.fd,
-                buf.unsafe_offset(got).unsafe_bitcast[NoneType](),
-                c_size_t(size - got),
-                c_int(0),
+            var n = _recv(
+                self.fd, Int(buf.unsafe_offset(got)), size - got, c_int(0)
             )
             if n < 0:
                 var e = get_errno().value
@@ -501,12 +491,12 @@ struct Stream(Movable):
 
     def close(mut self):
         if self.fd >= 0:
-            _ = external_call["close", c_int](self.fd)
+            _ = close_fd(self.fd)
             self.fd = -1
 
     def __deinit__(deinit self):
         if self.fd >= 0:
-            _ = external_call["close", c_int](self.fd)
+            _ = close_fd(self.fd)
 
 
 def wall_ns() -> UInt64:
@@ -593,12 +583,12 @@ struct Listener(Movable):
 
     def close(mut self):
         if self.fd >= 0:
-            _ = external_call["close", c_int](self.fd)
+            _ = close_fd(self.fd)
             self.fd = -1
 
     def __deinit__(deinit self):
         if self.fd >= 0:
-            _ = external_call["close", c_int](self.fd)
+            _ = close_fd(self.fd)
 
 
 comptime POLLIN: Int16 = 0x1
@@ -623,9 +613,7 @@ def poll(
         at.unsafe_bitcast[Int32]().unsafe_write(Int32(fds[i]))
         at.unsafe_offset(4).unsafe_bitcast[Int16]().unsafe_write(events[i])
     while True:
-        var r = external_call["poll", c_int](
-            base.unsafe_bitcast[NoneType](), c_uint(n), c_int(timeout_ms)
-        )
+        var r = _c_poll(Int(base), n, c_int(timeout_ms))
         if r >= 0:
             break
         if get_errno().value != EINTR:
