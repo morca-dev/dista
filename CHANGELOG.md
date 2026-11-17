@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-17
+
 ### Fixed
 
 - dista declares libc's `send`, `recv`, `connect`, `close`, `setsockopt`, `getsockopt`, `poll` and `getaddrinfo` as Mosaad-M/tcp and tls do, so a binary can import both ([#134](https://github.com/morca-dev/dista/issues/134)).
