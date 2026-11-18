@@ -38,7 +38,6 @@ an `ObjectRef` like a task does; `checkpoint` saves its state to
 """
 
 from std.os import getenv
-from std.time import perf_counter_ns, sleep
 
 from dista.auth import send_auth
 from dista.client import (

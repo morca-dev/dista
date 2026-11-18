@@ -4,7 +4,6 @@ starts and drains workers from `dista scale --once`; every result must come
 back exact.
 """
 
-from std.os import getenv
 from std.time import sleep
 
 from dista import ObjectRef, Runtime, Task

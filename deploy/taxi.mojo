@@ -44,7 +44,6 @@ from std.time import perf_counter_ns
 
 from arrow_mlake import RecordBatch
 from iceberg import (
-    FileIO,
     FileScanTask,
     ScanOptions,
     TableMetadata,

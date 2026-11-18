@@ -45,7 +45,7 @@ from dista.sizing import (
     parse_pressure,
     resident_bytes,
 )
-from dista.socket import Listener, Stream, stream_pair
+from dista.socket import Listener, stream_pair
 from dista.task import StatePtr
 from dista.worker import Worker
 

@@ -8,7 +8,6 @@ head before it made.
 
 from std.os import setenv, unsetenv
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
-from std.time import sleep
 
 from dista.codec import get_scalar, put_scalar
 from dista.conn import Conn

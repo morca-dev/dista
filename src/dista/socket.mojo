@@ -10,7 +10,7 @@ closed peer is kept from raising SIGPIPE; `platform_map` picks the right value
 for each.
 """
 
-from std.ffi import c_int, c_size_t, c_ssize_t, c_uint, external_call, get_errno
+from std.ffi import c_int, c_uint, external_call, get_errno
 from std.memory import Pointer, stack_allocation
 from std.os import getenv
 from std.sys.info import CompilationTarget, platform_map

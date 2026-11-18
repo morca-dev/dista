@@ -13,10 +13,9 @@ well under a millisecond, but a client that connects and sends nothing holds
 it for the timeout.
 """
 
-from std.ffi import c_int
 from std.os import getenv
 
-from dista.socket import Listener, Stream, poll_readable, recv_some
+from dista.socket import Listener, poll_readable, recv_some
 
 comptime READ_TIMEOUT_MS = 200
 
