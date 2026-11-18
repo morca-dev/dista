@@ -18,7 +18,6 @@ from dista import ObjectRef, Runtime, Seq, Task
 from dista.client import TaskContext
 from dista.conn import BIG_FRAME, Conn
 from dista.frame import (
-    KIND_ERROR,
     KIND_FETCH,
     KIND_PART,
     KIND_RESULT,
@@ -26,7 +25,7 @@ from dista.frame import (
     Parts,
     fetch_payload,
 )
-from dista.socket import Stream, stream_pair
+from dista.socket import stream_pair
 from dista.store import Location, write_shared
 from dista.task import StatePtr
 from dista.worker import SERVE_CHUNK, SERVE_WINDOW, Worker, _Outgoing

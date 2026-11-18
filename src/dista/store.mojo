@@ -29,7 +29,7 @@ since mapped files are padded.
 """
 
 from std.ffi import c_int, c_size_t, external_call
-from std.memory import stack_allocation, unsafe_memcpy
+from std.memory import stack_allocation
 from std.os import getenv
 from std.sys.info import CompilationTarget
 from std.time import perf_counter_ns

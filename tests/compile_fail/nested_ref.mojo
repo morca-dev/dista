@@ -3,7 +3,7 @@ refs only as the argument, in a list, or beside a value; nested ones would
 need Ray's borrowing. tests/compile_fail.sh checks the error names the fix.
 """
 
-from dista import ObjectRef, Runtime, Seq, Task
+from dista import ObjectRef, Runtime, Task
 
 
 @fieldwise_init
