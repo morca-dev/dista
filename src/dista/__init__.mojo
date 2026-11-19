@@ -1,4 +1,4 @@
-"""dista: distributed tasks for Mojo.
+"""`dista`: distributed tasks for Mojo.
 
 Declare a remote function as a task, start a runtime with it registered, and
 call it:

@@ -265,7 +265,7 @@ def test_tasks_run_beside_an_actor() raises:
     var spans = rt.spans()
     var called = 0
     for ref sp in spans:
-        if sp.task.find("add") >= 0:
+        if "add" in sp.task:
             called += 1
     assert_true(called >= 100)
 

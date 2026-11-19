@@ -63,7 +63,7 @@ def main() raises:
     var replay = getenv("FUZZ_REPLAY")
     if replay != "":
         # Run one saved input, e.g. build/fuzz-<name>-last.bin after an abort.
-        var data = List[UInt8]()
+        var data: List[UInt8]
         with open(replay, "r") as f:
             data = f.read_bytes()
         target(data)

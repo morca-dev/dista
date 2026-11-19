@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   # A release PR (only versions, CHANGELOG.md, revs and locks change; see
-  # tools/release_only.py in magmalake/.github) skips the nightly leg, kind,
+  # tools/release_only.py in magmalake/.github) skips the tests, kind,
   # fuzz and the data shards below, and runs a consumer build of the PR head
   # instead. The verdict is its own fast job because the jobs below wait for
   # it; the build is the next one.
@@ -42,8 +42,9 @@ jobs:
       pull-requests: read
     with:
       # The test legs below are skipped on release PRs, and the consumer build
-      # is the check (the tests build against sibling checkouts of the other tins).
+      # is the check (the data tests build against sibling checkouts of the other tins).
       task: ""
+      mojo-compiler: "==1.3.0.dev2026111805"
 
   # Whether the PR changes anything but prose (*.md, docs/, the licence
   # files), which no test, build or check reads. Pushes, the nightly, runs by
@@ -67,7 +68,7 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
   test:
-    name: ${{ matrix.env == 'default' && 'stable' || matrix.env }} / ${{ matrix.os }}
+    name: ${{ matrix.os }}
     needs: [changes, release]
     # Runs even if `changes` failed: then everything does.
     if: ${{ !cancelled() && needs.release.outputs.release_only != 'true' }}
@@ -77,7 +78,6 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
-        env: [default, nightly]
     defaults:
       run:
         working-directory: dista.mojo
@@ -89,41 +89,13 @@ jobs:
         with:
           path: dista.mojo
 
-      # The nightly compiles memory-region, arrow-mlake, objectstore and threads from source,
-      # because their packages are precompiled by 1.2.0 and a 1.3 compiler
-      # refuses them. The refs match the pins in pixi.toml.
-      - if: needs.changes.outputs.code != 'false' && (matrix.env == 'nightly')
-        uses: actions/checkout@v4
-        with:
-          repository: magmalake/memory-region.mojo
-          ref: 40068c4f95ea659e9b78aa91ced45420b07e3e6e
-          path: memory-region.mojo
-      - if: needs.changes.outputs.code != 'false' && (matrix.env == 'nightly')
-        uses: actions/checkout@v4
-        with:
-          repository: magmalake/arrow-mlake.mojo
-          ref: d2fc48903dc4c6d7c0a251a9efb1337e138c8908
-          path: arrow-mlake.mojo
-      - if: needs.changes.outputs.code != 'false' && (matrix.env == 'nightly')
-        uses: actions/checkout@v4
-        with:
-          repository: magmalake/objectstore.mojo
-          ref: ff66975c095f392695facc1b6dd56823dec914bc
-          path: objectstore.mojo
-      - if: needs.changes.outputs.code != 'false' && (matrix.env == 'nightly')
-        uses: actions/checkout@v4
-        with:
-          repository: magmalake/threads.mojo
-          ref: f45e780a8de77278c140cee36904e46e93e0ca1c
-          path: threads.mojo
-
       - if: needs.changes.outputs.code != 'false'
         uses: prefix-dev/setup-pixi@v0.10.2
         with:
           # Pinned: pixi.lock is written by this version, and a newer pixi
           # rejects the committed lock with "lock file not up-to-date".
           pixi-version: v0.78.0
-          environments: ${{ matrix.env }}
+          environments: default
           manifest-path: dista.mojo/pixi.toml
           # Only main and the nightly write the environment cache. Every PR
           # writing ~1 GB per environment kept the repository over GitHub's
@@ -139,9 +111,9 @@ jobs:
       - if: needs.changes.outputs.code != 'false'
         uses: actions/cache/restore@v4
         with:
-          path: dista.mojo/.pixi/envs/${{ matrix.env }}/share/max/cache
-          key: mojo-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('dista.mojo/pixi.lock') }}-${{ github.run_id }}
-          restore-keys: mojo-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('dista.mojo/pixi.lock') }}-
+          path: dista.mojo/.pixi/envs/default/share/max/cache
+          key: mojo-${{ runner.os }}-default-${{ hashFiles('dista.mojo/pixi.lock') }}-${{ github.run_id }}
+          restore-keys: mojo-${{ runner.os }}-default-${{ hashFiles('dista.mojo/pixi.lock') }}-
 
       # The frame and runtime tests fork real processes and talk over
       # loopback TCP. Linux is the leg that checks the socket layer's
@@ -149,24 +121,23 @@ jobs:
       # MSG_NOSIGNAL all differ from macOS.
       - if: needs.changes.outputs.code != 'false'
         name: Tests
-        run: pixi run -e ${{ matrix.env }} test
+        run: pixi run test
 
       # Entries a week old go before saving, so the cache can't grow without
       # bound; one still in use is rebuilt once.
       - if: always() && needs.changes.outputs.code != 'false' && github.event_name != 'pull_request'
         name: Prune Mojo's compile cache
-        run: find .pixi/envs/${{ matrix.env }}/share/max/cache -type f -mtime +7 -delete || true
+        run: find .pixi/envs/default/share/max/cache -type f -mtime +7 -delete || true
       - if: always() && needs.changes.outputs.code != 'false' && github.event_name != 'pull_request'
         uses: actions/cache/save@v4
         with:
-          path: dista.mojo/.pixi/envs/${{ matrix.env }}/share/max/cache
-          key: mojo-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('dista.mojo/pixi.lock') }}-${{ github.run_id }}
+          path: dista.mojo/.pixi/envs/default/share/max/cache
+          key: mojo-${{ runner.os }}-default-${{ hashFiles('dista.mojo/pixi.lock') }}-${{ github.run_id }}
 
   # Tasks over Parquet and Iceberg. parquet.mojo, iceberg.mojo and their
-  # siblings compile from source, at the revisions iceberg-mojo 0.8.2 was
-  # published with; arrow-mlake at dista's pin; memory-region at the fix that
-  # lets it share a binary with the standard library's file seek. See the
-  # data environment in pixi.toml.
+  # siblings compile from source, at the revisions of their Mojo 1.3 nightly
+  # ports; the tins pixi.toml pins, at the same revisions. See the data
+  # environment in pixi.toml.
   data:
     needs: [changes, release]
     if: ${{ !cancelled() && github.event_name != 'schedule' && needs.changes.outputs.code != 'false' && needs.release.outputs.release_only != 'true' }}
@@ -179,39 +150,39 @@ jobs:
         with:
           path: dista.mojo
       - uses: actions/checkout@v4
-        with: {repository: magmalake/memory-region.mojo, ref: 40068c4f95ea659e9b78aa91ced45420b07e3e6e, path: memory-region.mojo}
+        with: {repository: magmalake/memory-region.mojo, ref: 62e2639756696cb960b80eef77e4ff081a732345, path: memory-region.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/arrow-mlake.mojo, ref: d2fc48903dc4c6d7c0a251a9efb1337e138c8908, path: arrow-mlake.mojo}
+        with: {repository: magmalake/arrow-mlake.mojo, ref: 472380b5d329230b8280d6b70ff70f7211f52538, path: arrow-mlake.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/parquet.mojo, ref: 9a596283d3612d1ebeca199f9e48f1c1a7eaab51, path: parquet.mojo}
+        with: {repository: magmalake/parquet.mojo, ref: cf8580375f7fd42ef8d1cf78cae1f9589c146195, path: parquet.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/iceberg.mojo, ref: 571f60ad8408dc8a9999ca0feffd506343333e59, path: iceberg.mojo}
+        with: {repository: magmalake/iceberg.mojo, ref: 09d63e560dc92bc983471fea036e428ea451f404, path: iceberg.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/threads.mojo, ref: f45e780a8de77278c140cee36904e46e93e0ca1c, path: threads.mojo}
+        with: {repository: magmalake/threads.mojo, ref: 820a7c6e8619d49e13f944dfba73328236eb4903, path: threads.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/thrift.mojo, ref: 21cdbce67d22d72e88e88a60e2f168b05b4ef9fa, path: thrift.mojo}
+        with: {repository: magmalake/thrift.mojo, ref: 388ef14690ec0bdd399b912a566047e8f8595c23, path: thrift.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/hashes.mojo, ref: 395aca597f9410bd0511df44d972f14b10a8b01d, path: hashes.mojo}
+        with: {repository: magmalake/hashes.mojo, ref: 452f8b2d506d421b5ef4a10db7ab2097a2d0d0dc, path: hashes.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/snappy.mojo, ref: b8172ed0a4ef13911cc225d46e26676a5b8f1ccd, path: snappy.mojo}
+        with: {repository: magmalake/snappy.mojo, ref: 00450d1e1beada529c622f9ea9495957c90c467b, path: snappy.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/deflate.mojo, ref: aeb571e54ac736b97c826a23f44501715fddc656, path: deflate.mojo}
+        with: {repository: magmalake/deflate.mojo, ref: eac551eae60ab22d171b63845914186e639f3be3, path: deflate.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/avro.mojo, ref: 479c9d390b5c12c2497e05f84b64bf690a8cfea3, path: avro.mojo}
+        with: {repository: magmalake/avro.mojo, ref: e9e9e9e548782136ff0b664754d7e4d468c33ca8, path: avro.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/roaring.mojo, ref: a90a7bd30cf1c21403a29059282072e93fbeeee2, path: roaring.mojo}
+        with: {repository: magmalake/roaring.mojo, ref: aec9b768aa3b570d33dc39c77e863826eaaf5c5b, path: roaring.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/objectstore.mojo, ref: ff66975c095f392695facc1b6dd56823dec914bc, path: objectstore.mojo}
+        with: {repository: magmalake/objectstore.mojo, ref: 4671e036421dc70081cdf4c3859b726dea75ecea, path: objectstore.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/zstd.mojo, ref: 76190bb31012cd2d2f6712c4e1724a66474215db, path: zstd.mojo}
+        with: {repository: magmalake/zstd.mojo, ref: f0206c289c455ea7b60169f19709e28d52a5f850, path: zstd.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/lz4.mojo, ref: 23cd6e54967d7e41573371507228ca5c958ca685, path: lz4.mojo}
+        with: {repository: magmalake/lz4.mojo, ref: c31dcbc1f58db966f29cc11aad1fc276b3d31b9b, path: lz4.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/brotli.mojo, ref: dcbf840d22e3deaf24c587d12d28570a9a882b7f, path: brotli.mojo}
+        with: {repository: magmalake/brotli.mojo, ref: e2ad69eaefd932ffce0aa918437d91708c190f4b, path: brotli.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/sqlite.mojo, ref: 0d76aa7b672c85580f4d8c5de855772bc972d535, path: sqlite.mojo}
+        with: {repository: magmalake/sqlite.mojo, ref: d66ef8c443be02a64a9acbb8501ceba48ea7258b, path: sqlite.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/postgres.mojo, ref: 324b2bb61e2e80327654abecf70fd4b2defbc50d, path: postgres.mojo}
+        with: {repository: magmalake/postgres.mojo, ref: 54ab11c1c9a33fb252cd23fd78a418ba5df5bfe9, path: postgres.mojo}
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           pixi-version: v0.78.0
@@ -311,7 +282,7 @@ jobs:
 
   # One check for every Linux job above: each passed, or, for a prose-only
   # PR, was skipped. The jobs' own checks still report too, so the ruleset's
-  # stable / ubuntu-latest, nightly / ubuntu-latest and format keep working.
+  # ubuntu-latest and format keep working.
   # (macOS runs only on the nightly, which this gate doesn't cover.)
   ci:
     if: ${{ always() && github.event_name != 'schedule' }}
