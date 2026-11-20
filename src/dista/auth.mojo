@@ -35,7 +35,7 @@ def cluster_token() -> String:
         var text: String
         with open(path, "r") as f:
             text = f.read()
-        var nl = text.find("\n")
+        var nl = text.find("\n").or_else(-1)
         return String(text[byte=:nl]) if nl >= 0 else text
     except:
         print("dista: can't read DISTA_TOKEN_FILE", path)

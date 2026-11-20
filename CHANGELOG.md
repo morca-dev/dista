@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **dista requires Mojo 1.3.0.dev2026111805** (was 1.2.0), one pinned nightly
+  for building, testing and every consumer. arrow-mlake-mojo, memory-region-mojo,
+  objectstore-mojo and threads-mojo move to their revisions built with it.
+
 ## [0.5.2] - 2026-11-17
 
 ### Fixed

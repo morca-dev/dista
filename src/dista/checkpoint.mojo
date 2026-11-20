@@ -57,7 +57,7 @@ def list_checkpoints(actor: UInt64) raises -> List[Int]:
     except:
         return out^  # nothing written there yet
     for ref loc in found:
-        var cut = loc.rfind("/")
+        var cut = loc.rfind("/").or_else(-1)
         try:
             out.append(Int(String(loc[byte = cut + 1 :])))
         except:

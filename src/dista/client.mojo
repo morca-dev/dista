@@ -1344,7 +1344,7 @@ struct TaskContext(Movable):
         self._hash = registry_hash
         self._client = None
 
-    def client(mut self) raises -> ref[self._client._value] Client:
+    def client(mut self) raises -> ref[self._client.value()] Client:
         if not self._client:
             if self._connect_to == "":
                 raise Error("this worker has no head address for a client")

@@ -1,4 +1,4 @@
-"""dista declares libc's socket calls as Mosaad-M/tcp and tls do.
+"""`dista` declares libc's socket calls as Mosaad-M/tcp and tls do.
 
 Mojo allows one signature per C symbol in a program, so a binary importing
 dista and tcp (or tls, or requests) compiles only if both declare `send`,

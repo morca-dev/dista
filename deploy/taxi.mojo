@@ -189,11 +189,11 @@ comptime ReadFile = Task[FileQuery, Seq[RecordBatch], read_file]
 
 
 def _q(
-    name: StringSlice,
-    filter: StringSlice,
+    name: StringSpan,
+    filter: StringSpan,
     columns: List[String],
     kind: Int,
-    sum_column: StringSlice = "",
+    sum_column: StringSpan = "",
 ) -> Query:
     return Query(
         String(name),

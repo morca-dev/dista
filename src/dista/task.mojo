@@ -47,7 +47,7 @@ from dista.codec import decode, encode, get_scalar, put_scalar
 from dista.seq import Seq
 
 
-def fnv1a64(s: StringSlice) -> UInt64:
+def fnv1a64(s: StringSpan) -> UInt64:
     """The 64-bit FNV-1a hash of `s`'s bytes."""
     var h: UInt64 = 0xCBF29CE484222325
     for b in s.as_bytes():

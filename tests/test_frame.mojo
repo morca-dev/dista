@@ -201,9 +201,7 @@ def test_a_payload_too_large_for_a_frame_raises() raises:
     is never read, so it needs no memory behind it."""
     var small = List[UInt8](length=16, fill=0)
     for size in [MAX_PAYLOAD + 1, 3 << 29, 9 << 29]:
-        var huge = Span[UInt8, origin_of(small)](
-            unsafe_ptr=small.unsafe_ptr(), length=size
-        )
+        var huge = Span(unsafe_ptr=small.unsafe_ptr(), length=size)
         var out = List[UInt8]()
         with assert_raises(contains="can't carry"):
             append_frame(out, KIND_RESULT, 1, 0, huge)

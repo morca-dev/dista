@@ -768,7 +768,8 @@ struct Worker[
             k += 1
         if self._metrics:
             if rev[k] & POLLIN:
-                answer_scrape(self._metrics.value(), self._page())
+                var page = self._page()
+                answer_scrape(self._metrics.value(), page)
             k += 1
         if self._wake_fd >= 0 and rev[k] & POLLIN:
             if take_wakes(self._wake_fd) > 0:

@@ -104,7 +104,7 @@ def target(data: List[UInt8]) raises:
 def main() raises:
     var replay = getenv("FUZZ_REPLAY")
     if replay != "":
-        var data = List[UInt8]()
+        var data: List[UInt8]
         with open(replay, "r") as f:
             data = f.read_bytes()
         target(data)
