@@ -1,5 +1,7 @@
 # dista
 
+[![Used by](https://mojourney.dev/badge/morca-dev/dista/used-by.svg)](https://mojourney.dev/repos/morca-dev/dista#used-by) [![Mojo version](https://mojourney.dev/badge/morca-dev/dista/mojo.svg)](https://mojourney.dev/repos/morca-dev/dista)
+
 A distributed task framework for Mojo: mark a function remote, call it, and the work runs across a cluster. Every node runs the same compiled binary, and data moves between tasks as Arrow.
 
 ```mojo
