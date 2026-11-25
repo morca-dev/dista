@@ -164,7 +164,7 @@ bench-readpath = { cmd = "scripts/mojo-build.sh -I src $DEP_INC bench/readpath.m
 # first, so a hard abort still leaves the crashing input behind; mozz saves
 # the ones it catches to build/fuzz-crashes/. FUZZ_RUNS sets the iterations.
 [feature.fuzz.dependencies]
-mozz_mlake = { git = "https://github.com/magmalake/mozz_mlake.git", rev = "fbd1ebf141417114e87b74c4b87e6d64eb771fac" }
+mozz_mlake = { git = "https://github.com/magmalake/mozz_mlake.git", rev = "fd90ab8ca0b3d9a363df879cd9355b3d8042b1a4" }
 
 [feature.fuzz.tasks]
 fuzz-frames = { cmd = "scripts/mojo-build.sh -D ASSERT=all -I src $DEP_INC fuzz/fuzz_frames.mojo -o build/fuzz-frames && ./build/fuzz-frames" }
