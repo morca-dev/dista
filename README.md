@@ -72,7 +72,7 @@ run the same binary as the head, the workers and the driver.
 - [DESIGN.md](DESIGN.md): how it works, and what was verified while writing it.
 
 ```
-pixi run test               # codec, frame, runtime and cluster tests, Mojo 1.3.0.dev2026111805
+pixi run test               # codec, frame, runtime and cluster tests, Mojo 1.3.0.dev2026112505
 pixi run -e data test-data    # tasks over Parquet and Iceberg; needs those tins and their siblings checked out next door
 pixi run bench              # task throughput
 pixi run test-kind          # the smoke test on a kind cluster (needs docker, kind, kubectl)
