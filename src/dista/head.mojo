@@ -58,6 +58,13 @@ the head before (or names an actor whose old checkpoints are still in
 `DISTA_CHECKPOINT_URI`). A task that was running when the head died may run
 again.
 
+A running `TaskStream`'s items arrive while it runs, each a result or stored
+frame whose task ID is the stream's. The head holds each for the stream's
+driver, as if the driver had submitted it, and delivers it like any result.
+The stream is in flight until its own ID is answered, with the number of
+items or an error. A stream whose worker goes away runs again elsewhere only
+if none of its items was answered yet; otherwise its end fails.
+
 A worker told to stop drains (see `worker.mojo`). The head sends it no more
 tasks and has the other workers adopt every result it holds: each fetches
 its copy, the head records where the result is now, and tells the driver
@@ -139,6 +146,7 @@ from dista.frame import (
     KIND_STATUS,
     KIND_STOP,
     KIND_TASK_MANY,
+    KIND_TASK_STREAM,
     GATHER,
     WITH_VALUE,
     MANY,
@@ -169,6 +177,7 @@ from dista.metrics import (
 )
 from dista.sizing import CAPACITY_ANNOUNCE
 from dista.store import Location
+from dista.stream import ITEMS_PER_STREAM
 
 comptime DRIVER_SHIFT = 40
 """Object IDs carry their driver's number above this bit."""
@@ -457,6 +466,10 @@ struct Head(Movable):
     var _many: Dict[UInt64, Int]
     """A running `TaskMany`'s first result, and how many it has: its worker
     going away fails them all."""
+    var _streams: Dict[UInt64, Int]
+    """Each `TaskStream` submitted and not ended, by its own ID, with how
+    many of its items have been answered: a stream with any can't run again.
+    """
     var _waiting: Dict[UInt64, _Task]
     """Tasks waiting for their inputs, by object, oldest first."""
     var _waiters: Dict[UInt64, List[UInt64]]
@@ -638,6 +651,7 @@ struct Head(Movable):
         self._driver_hash = Dict[UInt64, UInt64]()
         self._stopped = False
         self._many = Dict[UInt64, Int]()
+        self._streams = Dict[UInt64, Int]()
         self._running = Dict[UInt64, _Task]()
         self._tries = Dict[UInt64, Int]()
         self._task_timeout = 0
@@ -1451,6 +1465,8 @@ struct Head(Movable):
                 )
             elif f.kind == KIND_TASK_MANY:
                 self._task_many(f^)
+            elif f.kind == KIND_TASK_STREAM:
+                self._task_stream(f^)
             elif f.kind == KIND_RESULT or f.kind == KIND_ERROR:
                 # Resuming: a small result or error the driver kept.
                 var obj = f.object_id
@@ -1567,6 +1583,10 @@ struct Head(Movable):
                 and f.kind != KIND_STORED
             ):
                 raise Error("worker sent frame kind ", Int(f.kind))
+            if f.task_id != 0:
+                # An item of the stream the task ID names.
+                if not self._stream_item(i, f.object_id, f.task_id, f.kind):
+                    return
             ref flight = self._inflight[i]
             for k in range(len(flight)):
                 if flight[k] == f.object_id:
@@ -1723,6 +1743,50 @@ struct Head(Movable):
             _Task(first, task, f^.take_payload(), kind=KIND_TASK_MANY)
         )
         self._stamp_queued(first)
+
+    def _task_stream(mut self, var f: Frame) raises:
+        """A `TaskStream`: queued like a task. Its items, the IDs after its
+        own, are held as they arrive (`_stream_item`)."""
+        if len(f.payload) < 8:
+            raise Error("truncated task-stream")
+        var obj = f.object_id
+        var last = obj + UInt64(ITEMS_PER_STREAM)
+        if last < obj or owner_of(last) != owner_of(obj):
+            raise Error("task-stream items run past their driver's IDs")
+        if self._known(obj):
+            return  # sent again, as by a driver resuming
+        self._hold(obj)
+        self._streams[obj] = 0
+        var task = f.task_id
+        self._open_span(obj, task)
+        self._enqueue(
+            _Task(obj, task, f^.take_payload(), kind=KIND_TASK_STREAM)
+        )
+        self._stamp_queued(obj)
+
+    def _stream_item(
+        mut self, i: Int, obj: UInt64, stream: UInt64, kind: UInt8
+    ) raises -> Bool:
+        """Worker `i` answered `obj`, an item of `stream`: holds it for the
+        stream's driver, the first time, and says whether to take the answer
+        as any result's. An item nobody wants any more, because its stream
+        ended or was cancelled or its driver left, is dropped, and its copy
+        freed."""
+        var wanted = (
+            stream in self._streams
+            and obj > stream
+            and obj - stream <= UInt64(ITEMS_PER_STREAM)
+            and owner_of(stream) in self._driver_conn
+            and stream not in self._dead
+        )
+        if not wanted or kind == KIND_ERROR:
+            if kind == KIND_STORED:
+                self._conns[i].send(KIND_FREE, obj, 0, List[UInt8]())
+            return False
+        if obj not in self._refs and obj not in self._dead:
+            self._hold(obj)
+            self._streams[stream] = self._streams.get(stream, 0) + 1
+        return True
 
     def _resume_actor(mut self, a: UInt64):
         """An actor created again by a driver resuming after a head restart:
@@ -2256,6 +2320,7 @@ struct Head(Movable):
     def _settle(mut self, object_id: UInt64):
         """`object_id`'s task is done: it no longer holds its inputs."""
         _ = self._many.pop(object_id, 0)
+        _ = self._streams.pop(object_id, 0)
         _ = self._running.pop(object_id, _Task(0, 0, List[UInt8]()))
         _ = self._tries.pop(object_id, 0)
         _ = self._due.pop(object_id, 0)
@@ -2568,6 +2633,7 @@ struct Head(Movable):
             dropped.append(obj)
         for obj in dropped:
             var parts = self._many.pop(obj, 1)
+            _ = self._streams.pop(obj, 0)
             _ = self._tries.pop(obj, 0)
             _ = self._spans.pop(obj, _Span(0, 0, -1, 0, 0, 0, 0, 0, 0, 0))
             var deps = self._deps_of.pop(obj, List[UInt64]())
@@ -2842,6 +2908,13 @@ struct Head(Movable):
                     "worker lost while running this task, after some of its"
                     " results were answered"
                 )
+        if self._streams.get(obj, 0) > 0:
+            # Its driver may have read those: running it again would make
+            # them twice.
+            return String(
+                "worker lost while running this stream, after some of its"
+                " items were answered"
+            )
         return String()
 
     def _shutdown(mut self):

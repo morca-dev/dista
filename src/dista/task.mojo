@@ -100,6 +100,11 @@ trait TaskLike:
         return False
 
     @staticmethod
+    def is_stream() -> Bool:
+        """Whether it streams its results (`TaskStream`)."""
+        return False
+
+    @staticmethod
     def owner() -> UInt64:
         """For a method, its actor's ID; 0 for anything else."""
         return 0

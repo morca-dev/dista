@@ -18,6 +18,13 @@ without the lock. The mutex orders the job's fields between the two threads.
 An executor that runs a `CtxTask` gives it a `TaskContext` of its own: a
 client per slot, so two tasks never share one connection.
 
+A `TaskStream` hands over each item as it puts it, while it runs. Its slot's
+`put` leaves the encoded item in the slot's mailbox, under the same mutex,
+and wakes the loop through the same pipe. The loop takes the items with the
+finished jobs, in one hold of the mutex: an executor leaves its job's items
+before it marks the job done, so a stream's items always reach the loop
+before, or with, its end.
+
 A thread body can't raise or capture (see the threads tin), so an executor
 catches its task's error and hands it back as the job's.
 
@@ -41,7 +48,9 @@ from threads import (
 )
 
 from dista.client import TaskContext
+from dista.frame import KIND_TASK_STREAM
 from dista.sizing import AUTO, Sizing
+from dista.stream import StreamSink
 from dista.socket import close_fd, set_nonblocking, wall_ns
 
 comptime DispatchFn = def(
@@ -125,6 +134,24 @@ struct Job(Movable):
         self.error = String()
 
 
+struct StreamItem(Movable):
+    """An item a stream put on a slot, for the loop to store and report."""
+
+    var stream: UInt64
+    var id: UInt64
+    var epoch: Int
+    """Its job's epoch: an item of a job from before a rejoin is dropped."""
+    var bytes: List[UInt8]
+
+    def __init__(
+        out self, stream: UInt64, id: UInt64, epoch: Int, var bytes: List[UInt8]
+    ):
+        self.stream = stream
+        self.id = id
+        self.epoch = epoch
+        self.bytes = bytes^
+
+
 struct _Shared(Movable):
     """What the loop and the executors share; on the heap, at an address the
     executors are given."""
@@ -138,6 +165,9 @@ struct _Shared(Movable):
     executor's while it's started."""
     var ctxs: List[TaskContext]
     """Each slot's client, used only by its executor."""
+    var mail: List[List[StreamItem]]
+    """Each slot's mailbox: the items its stream put that the loop hasn't
+    taken. Under `mutex`."""
     var next: Int
     """The next executor's slot. Under `mutex`."""
     var stop: Bool
@@ -158,10 +188,12 @@ struct _Shared(Movable):
         self.state = List[Int](capacity=n)
         self.jobs = List[Job](capacity=n)
         self.ctxs = List[TaskContext](capacity=n)
+        self.mail = List[List[StreamItem]](capacity=n)
         for _ in range(n):
             self.state.append(IDLE)
             self.jobs.append(Job())
             self.ctxs.append(TaskContext(head_addr, resume_at, registry_hash))
+            self.mail.append(List[StreamItem]())
         self.next = 0
         self.stop = False
         self.wake_w = wake_w
@@ -210,6 +242,8 @@ struct Executors[dispatch: DispatchFn](Movable):
     var _running: Int
     var _wake_r: c_int
     var _done: Bool
+    var _items: List[StreamItem]
+    """Items `take_done` took from the mailboxes, for `take_items`."""
 
     def __init__(
         out self,
@@ -237,6 +271,7 @@ struct Executors[dispatch: DispatchFn](Movable):
         self._busy = List[Bool](capacity=n)
         self._running = 0
         self._done = False
+        self._items = List[StreamItem]()
         for _ in range(n):
             self._busy.append(False)
         for _ in range(n):
@@ -282,7 +317,10 @@ struct Executors[dispatch: DispatchFn](Movable):
         sh.mutex.unlock()
 
     def take_done(mut self) -> List[Job]:
-        """The jobs finished since the last call, their slots idle again."""
+        """The jobs finished since the last call, their slots idle again.
+
+        It takes the items streams put meanwhile too, for `take_items`: those
+        of a job it returns were all put before it ended."""
         var buf = Array[UInt8, 64](fill=0)
         while True:
             if (
@@ -293,6 +331,11 @@ struct Executors[dispatch: DispatchFn](Movable):
         var out = List[Job]()
         ref sh = self._shared[]
         sh.mutex.lock()
+        for i in range(len(sh.mail)):
+            if len(sh.mail[i]) > 0:
+                var items = List[StreamItem]()
+                swap(items, sh.mail[i])
+                self._items.extend(items^)
         for i in range(len(sh.state)):
             if sh.state[i] == DONE:
                 var job = Job()
@@ -303,6 +346,34 @@ struct Executors[dispatch: DispatchFn](Movable):
                 self._running -= 1
         sh.mutex.unlock()
         return out^
+
+    def take_items(mut self) -> List[StreamItem]:
+        """The items the last `take_done` took, in the order they were put:
+        store and report them before the jobs it returned."""
+        var out = List[StreamItem]()
+        swap(out, self._items)
+        return out^
+
+    @staticmethod
+    def _mail(
+        target: Int,
+        slot: Int,
+        stream: UInt64,
+        id: UInt64,
+        var bytes: List[UInt8],
+    ) raises:
+        """A slot's `put`: leaves the item in the slot's mailbox and wakes
+        the loop, which stores and reports it."""
+        var sh = Pointer[_Shared, MutUntrackedOrigin](
+            unsafe_from_address=target
+        )
+        sh[].mutex.lock()
+        # The slot's job is its executor's while it runs: this is that thread.
+        var epoch = sh[].jobs[slot].epoch
+        sh[].mail[slot].append(StreamItem(stream, id, epoch, bytes^))
+        sh[].mutex.unlock()
+        var b = Array[UInt8, 1](fill=1)
+        _ = external_call["write", Int](sh[].wake_w, b.unsafe_ptr(), 1)
 
     def _stop(mut self):
         """Ends the executors: joins them if none is running a task, else
@@ -352,7 +423,14 @@ struct Executors[dispatch: DispatchFn](Movable):
             if sh[].state[i] != STARTED:
                 break  # stopping
             sh[].mutex.unlock()
+            var streaming = sh[].jobs[i].kind == KIND_TASK_STREAM
+            if streaming:
+                sh[].ctxs[i].stream = StreamSink(
+                    Int(arg), i, sh[].jobs[i].object_id, Self._mail
+                )
             Self._run(sh[].jobs[i], sh[].ctxs[i])
+            if streaming:
+                sh[].ctxs[i].stream = StreamSink()
             sh[].mutex.lock()
             sh[].state[i] = DONE
             sh[].mutex.unlock()
