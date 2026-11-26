@@ -45,6 +45,8 @@ Every frame is a 4-byte little-endian length, then that many bytes:
 | 32 cancel | driver to head | none: fail this object's task with "cancelled", and drop it if it hasn't run |
 | 33 part | worker to a driver or worker that fetched | the object's size u64, this part's offset u64, then its bytes; parts come in order, and the object is whole when they reach its size |
 | 34 auth | any process to a head or a worker's object server, first on the connection | the cluster token's bytes (`dista.auth`, only with `DISTA_TOKEN` set) |
+| 35 capacity | worker to head | the tasks it has room to run now, u64 (see `KIND_CAPACITY`) |
+| 36 task-stream | driver to head, head to worker | the window u64, then the encoded argument; the object ID is the stream's end, and its items are the IDs after it |
 
 A frame holds at most `MAX_FRAME` bytes, so a result larger than that
 crosses hosts in parts. A fetcher says it takes parts by putting the largest
@@ -100,6 +102,15 @@ with its own result, stored or error frame, as if each were a task. When
 some of those results live on workers, the head sends the task as
 task-inputs, and the worker fetches them before it runs the task. An address
 is 12 bytes: the IPv4 address, then the port as a u64.
+
+A task-stream frame runs a `TaskStream`. Its worker answers each item as it
+is put, with a result or stored frame for the item's ID whose task ID is the
+stream's own, so the head knows which stream it belongs to. Item `k` is the
+stream's ID plus 1 plus `k`, and the driver sets aside the 2^20 IDs after the
+stream's. When the task ends, the worker answers the stream's own ID with
+the number of items, an encoded `Int`, or with the task's error: its items
+always come before it. The window is how many items may be put and not yet
+read; the head and the worker carry it, and nothing enforces it yet.
 
 The head counts references to every object: its driver's, until a release,
 and one per submitted task that takes it as input, until that task settles.
@@ -160,6 +171,9 @@ comptime KIND_CAPACITY: UInt8 = 35
 """Worker to head: the tasks it has room to run now, a u64 between 1 and its
 slots (`DISTA_WORKER_SLOTS=auto`, see `sizing.mojo`). Sent only to a head
 that announced it reads it, with a `KIND_FREE` of object 0."""
+comptime KIND_TASK_STREAM: UInt8 = 36
+"""Driver to head, head to worker: run a `TaskStream`. The payload is the
+window, u64, then the encoded argument; the object ID is the stream's end."""
 comptime GATHER: UInt8 = 1
 """Task-after and task-inputs flag: the inputs gather into a `Seq`."""
 comptime WITH_VALUE: UInt8 = 2

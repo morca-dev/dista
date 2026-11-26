@@ -42,6 +42,7 @@ from dista.frame import (
     KIND_TASK,
     KIND_TASK_AFTER,
     KIND_TASK_MANY,
+    KIND_TASK_STREAM,
     GATHER,
     WITH_VALUE,
     MANY,
@@ -84,6 +85,7 @@ from dista.task import (
     fnv1a64,
 )
 from dista.store import Location
+from dista.stream import ITEMS_PER_STREAM, StreamLike, StreamRef, StreamSink
 from memory_region import SharedMapping
 
 
@@ -607,6 +609,8 @@ struct Client(Movable):
         """Submits task `T` on `arg` and returns a handle to its result."""
         if T.is_many():
             raise Error(T.name(), " has several results: use remote_many")
+        if T.is_stream():
+            raise Error(T.name(), " is a stream: use stream")
         _one_argument[T]()
         var args = List[UInt8]()
         encode(arg, args)
@@ -641,6 +645,8 @@ struct Client(Movable):
         T: TaskLike
     ](mut self, arg: ObjectRef[T.A]) raises -> ObjectRef[T.R]:
         """Submits task `T` to run on another task's result, once it exists."""
+        if T.is_stream():
+            raise Error(T.name(), " is a stream: use stream")
         _one_argument[T]()
         return self._submit_after[T.R](T.id(), [arg.id], False)
 
@@ -735,6 +741,80 @@ struct Client(Movable):
             self._live[refs[k].id] = True
         self._submit(refs[0].id, KIND_TASK_AFTER, task_id, body^, deps.copy())
         return refs^
+
+    def stream[
+        T: StreamLike
+    ](mut self, arg: T.A, window: Int = 16) raises -> StreamRef[T.Item]:
+        """Submits task `T`, a `TaskStream`, on `arg`, and returns a handle
+        to read its items with `next`, each an object of its own.
+
+        `window` is how many items the task may put that `next` hasn't
+        returned (0, any); it travels with the task, but isn't enforced yet.
+        The stream's ID and the `ITEMS_PER_STREAM` after it are its own.
+        """
+        if window < 0:
+            raise Error("a stream's window can't be negative, got ", window)
+        var body = List[UInt8]()
+        put_scalar[DType.uint64](body, UInt64(window))
+        encode(arg, body)
+        var id = self._new_id()
+        # Item `k` is `id + 1 + k`: no other object takes those IDs.
+        self._counter += UInt64(ITEMS_PER_STREAM)
+        self._submit(id, KIND_TASK_STREAM, T.id(), body^, List[UInt64]())
+        return StreamRef[T.Item](id)
+
+    def next[
+        X: AnyType
+    ](
+        mut self, mut s: StreamRef[X], timeout: Float64 = -1.0
+    ) raises -> Optional[ObjectRef[X]]:
+        """Waits for stream `s`'s next item and returns its ref, or None once
+        the task has ended and every item has been returned.
+
+        If the task raised, the items it put before are all returned first,
+        and then this raises its error. Reading the end releases the
+        stream's own object, so `s.id` can't be waited on after that, and
+        `next` returns None from then on. With `timeout` seconds (negative:
+        no limit), it raises an error starting "timed out" if neither the
+        item nor the end has come by then; `s` stays valid.
+        """
+        if s._ended:
+            return None
+        var deadline = Int(perf_counter_ns()) + Int(max(timeout, 0.0) * 1e9)
+        while True:
+            var item = s.next_id()
+            if self._settled(item):
+                s._taken += 1
+                return ObjectRef[X](item)
+            if self._settled(s.id):
+                # Its items come before its end, so none is still on the way.
+                s._ended = True
+                var end = ObjectRef[Int](s.id)
+                var n: Int
+                try:
+                    n = self.get(end)
+                except e:
+                    self.release(end)
+                    raise e^
+                self.release(end)
+                if s._taken < n:
+                    raise Error(
+                        s,
+                        " ended after ",
+                        n,
+                        " items, but item ",
+                        s._taken,
+                        " never came",
+                    )
+                return None
+            if timeout < 0.0:
+                self._read_one()
+                continue
+            var left = deadline - Int(perf_counter_ns())
+            if left <= 0:
+                raise Error("timed out after ", timeout, " s waiting for ", s)
+            if poll_readable([self._head.fd], left // 1_000_000 + 1)[0]:
+                self._read_one()
 
     def create[
         T: ActorLike
@@ -1379,12 +1459,15 @@ def _one_argument[T: TaskLike]() raises:
 
 struct TaskContext(Movable):
     """What a worker hands a `CtxTask`: a client of its own to the head,
-    opened the first time a task asks for it."""
+    opened the first time a task asks for it. A `TaskStream` gets its sink
+    from here, which the worker sets while the stream runs."""
 
     var _connect_to: String
     var _resume_at: String
     var _hash: UInt64
     var _client: Optional[Client]
+    var stream: StreamSink
+    """Where the running stream's items go; the default raises."""
 
     def __init__(
         out self, connect_to: String, resume_at: String, registry_hash: UInt64
@@ -1395,6 +1478,7 @@ struct TaskContext(Movable):
         self._resume_at = resume_at
         self._hash = registry_hash
         self._client = None
+        self.stream = StreamSink()
 
     def client(mut self) raises -> ref[self._client.value()] Client:
         if not self._client:
