@@ -44,7 +44,7 @@ jobs:
       # The test legs below are skipped on release PRs, and the consumer build
       # is the check (the data tests build against sibling checkouts of the other tins).
       task: ""
-      mojo-compiler: "==1.3.0.dev2026112505"
+      mojo-compiler: "==1.3.0.dev2026112605"
 
   # Whether the PR changes anything but prose (*.md, docs/, the licence
   # files), which no test, build or check reads. Pushes, the nightly, runs by
@@ -150,39 +150,39 @@ jobs:
         with:
           path: dista.mojo
       - uses: actions/checkout@v4
-        with: {repository: magmalake/memory-region.mojo, ref: 31bda02fa429496e064d764d2d4039160f77e1af, path: memory-region.mojo}
+        with: {repository: magmalake/memory-region.mojo, ref: f1cf3cb32c33ad52a65e8efdb891a17e8f99731b, path: memory-region.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/arrow-mlake.mojo, ref: bff8b8231956c09e86e71dbe8029ede578f63bd3, path: arrow-mlake.mojo}
+        with: {repository: magmalake/arrow-mlake.mojo, ref: fe045a5db79acb15e20269f230397953a47c47dc, path: arrow-mlake.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/parquet.mojo, ref: 7f8bf9a42544e70a12b6b05820321bb31431d228, path: parquet.mojo}
+        with: {repository: magmalake/parquet.mojo, ref: 403c7bd88646e28fa8ea1a2168bc6eea89ea4a48, path: parquet.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/iceberg.mojo, ref: 67f7616f54a59fde5bd3819e4494635b7452203b, path: iceberg.mojo}
+        with: {repository: magmalake/iceberg.mojo, ref: 02706bf6159fc067efe162786bbe5ed68eff9fea, path: iceberg.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/threads.mojo, ref: 16efc3d2a8a0e2ea377a0cd1dc1f40131118ccb3, path: threads.mojo}
+        with: {repository: magmalake/threads.mojo, ref: d86b368e4aabb3c9a09b0f54d117230a404e4258, path: threads.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/thrift.mojo, ref: a8f68811eadb454645696f8566972e9197113660, path: thrift.mojo}
+        with: {repository: magmalake/thrift.mojo, ref: 9b4a2075921e93149d72be5c62eb64db736f87c3, path: thrift.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/hashes.mojo, ref: 09ae3fc45c6158949f5cd787f9d355f7b3d524e3, path: hashes.mojo}
+        with: {repository: magmalake/hashes.mojo, ref: 18799755e3eaf21e2761152a15f57344c43e8391, path: hashes.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/snappy.mojo, ref: 4c3d35773100b609d658042bacbc7550edc6b2a0, path: snappy.mojo}
+        with: {repository: magmalake/snappy.mojo, ref: 841165c6ced116af46f1ad16567dcdac797fc30f, path: snappy.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/deflate.mojo, ref: 22ccbfeb35b20f6d0e1b33b32bed3a1e18e4fc00, path: deflate.mojo}
+        with: {repository: magmalake/deflate.mojo, ref: ab4f29f9bcdca7ce76f820c78bc200f614c71a46, path: deflate.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/avro.mojo, ref: 06235449801634895e22a609269f180302cbe4e7, path: avro.mojo}
+        with: {repository: magmalake/avro.mojo, ref: c50aec583775b9cca5d04fea757e556b51f542ed, path: avro.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/roaring.mojo, ref: 24a9b476bd6224b33f8f9050c447e1981412533d, path: roaring.mojo}
+        with: {repository: magmalake/roaring.mojo, ref: ba2225bd9e7f9e2f3d4d20f46e2a5e9420de5bd6, path: roaring.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/objectstore.mojo, ref: c5375eadf13f748883cd535a450cf296fbcf2b22, path: objectstore.mojo}
+        with: {repository: magmalake/objectstore.mojo, ref: e4b8d49c69e0e50aafe7f737c46df9026c3e52c9, path: objectstore.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/zstd.mojo, ref: d0752506a54990d23500a601f6ca46933c4afc93, path: zstd.mojo}
+        with: {repository: magmalake/zstd.mojo, ref: 2936d2023ff8654954c5ce37431f4086f0fc08f3, path: zstd.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/lz4.mojo, ref: 87496d73b94638dd36755a9b32caf1545675e8f8, path: lz4.mojo}
+        with: {repository: magmalake/lz4.mojo, ref: 7845abe6cbac22d68663e81103054c3d6570746e, path: lz4.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/brotli.mojo, ref: 7bf6f50aad8d591195182cbf95df3331049b9a12, path: brotli.mojo}
+        with: {repository: magmalake/brotli.mojo, ref: 2bded496a5d7ec724e1c1c3f8fae53fe54418c89, path: brotli.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/sqlite.mojo, ref: e0c4e75c23d4d49a8b13535896212428830c31cb, path: sqlite.mojo}
+        with: {repository: magmalake/sqlite.mojo, ref: 3885ba57fb97c04e08fea2678e683b76fd8d00c4, path: sqlite.mojo}
       - uses: actions/checkout@v4
-        with: {repository: magmalake/postgres.mojo, ref: 023ca41aa0ba05ee021dd30762e0806d8c1840b1, path: postgres.mojo}
+        with: {repository: magmalake/postgres.mojo, ref: e9afc56cc1b6ba8df0eae5cd6f950d75e73b756c, path: postgres.mojo}
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           pixi-version: v0.78.0
