@@ -460,3 +460,140 @@ A Spot interruption, where a deployment allows Spot, is the same drain: the inst
 | 3 | Done, from zero workers and back to zero. **`tests/autoscale.sh`**: a head, one worker and a provider loop in shell that starts workers as processes and drains them with `dista drain`, from `decide`'s output (`dista scale --once` prints it). | 200 tasks of 0.5 s with `max_workers=6`: the job grows to 6 workers and back to 1 after it, every result is exact, no task runs twice and no result is lost. | ~300 |
 
 orca's side (its ec2 runner as the provider, `--workers 1..12`, the budget) is orca's DESIGN.md, phase 6.
+
+## Streamed results (plan, 2026-11-26)
+
+A task returns once, so everything it makes is in memory until it ends, and
+nothing downstream starts before then. A `TaskMany` has several results, but
+their number is fixed before it runs and they are all answered at its end.
+A read of a file that can't be split (a gzip of JSON lines, say) needs
+neither: it should hand over each batch as it's made, hold none of them, and
+slow down when nobody reads. This is the second step of morca's
+[docs/layers.md](https://github.com/morca-dev/morca/blob/main/docs/layers.md),
+after `rt.wait`, and what `dista.flow`'s read operator runs on. It is Ray's
+generator task.
+
+```mojo
+def read_lines(path: String, mut out: Emit[RecordBatch]) raises:
+    for batch in batches_of(path):
+        out.put(batch)          # an object of its own; blocks while the window is full
+
+comptime ReadLines = TaskStream[String, RecordBatch, read_lines]
+
+var s = rt.stream[ReadLines](path, window=16)   # a StreamRef[RecordBatch]
+while True:
+    var r = rt.next(s)                          # Optional[ObjectRef[RecordBatch]]
+    if not r:
+        break                                   # the task ended; an error raises here
+    use(rt.take(r.value()))
+```
+
+### What a stream is
+
+- **Each `put` is an object like any other.** It is small or stored, mapped
+  or fetched, spilled, released and given to other tasks exactly as a task's
+  result is. Nothing downstream knows it came from a stream.
+- **Item IDs are the stream's own, counted up.** A stream's ID is an object
+  ID from its driver, and item *k* is that ID plus 1 plus *k*. The driver
+  sets aside the 2^20 IDs after the stream's, as a `TaskMany` may have at
+  most 2^20 results, so nobody is asked for IDs while the task runs. A
+  `put` past that fails the task, saying so.
+- **The stream's own object is its end.** When the task returns, the worker
+  answers the stream's ID with the number of items, as a result. If the
+  task raises, it answers it with the error. So "has it ended" is `ready`
+  on one more object, and nothing else is new to a driver's bookkeeping.
+- **`rt.next(s, timeout=-1)`** waits until item *k* or the end has settled,
+  and returns the item's ref, or nothing once the end says there are no
+  more. Items made before an error are all returned before `next` raises
+  it. With a timeout it raises "timed out", as `get` does.
+- **Waiting on several streams** is `rt.wait` on ids: `s.next_id()` is the
+  item `next` would return, and `s.id` is the end.
+- **`next` releases the end when it reads it**, so a stream read to its end
+  leaves nothing behind but the items still held. `rt.cancel(s)` and
+  `rt.release(s)` act on `s.id`: releasing a stream not yet ended cancels it.
+- **An item exists once it's answered.** A task can't be submitted on an
+  item `next` hasn't returned.
+
+### The window
+
+`put` blocks while the items put less the items `next` has returned are
+`window` or more (default 16; 0 never blocks). The driver says how many it
+has taken in a credit frame, which the head passes to the stream's worker.
+A stream nobody reads therefore holds `window` items and stops. Releasing
+an item is separate, and frees it as it does any result.
+
+The window counts items, not bytes, because a reader's budget is in batches
+(a flow's operator has so many in flight). A window in bytes can be added
+beside it.
+
+### On the worker
+
+A task's function runs on the worker's loop thread with one slot, and on a
+slot's thread with more. Storing a result and talking to the head belong to
+the loop thread alone. So `Emit` has two ways to hand over an item, chosen
+by the worker, and the function sees one `put`:
+
+| | One slot | Several slots |
+|---|---|---|
+| Handing over | `put` stores and reports the item itself: it is on the loop's thread. | `put` leaves the encoded item in its slot's mailbox (a mutex and a condition, as a job's hand-off) and wakes the loop, which stores and reports it. |
+| A full window | `put` runs the loop's I/O (the head, fetches, `/metrics`) until a credit comes. It starts no other task. | `put` waits on the mailbox's condition; the loop signals it when a credit comes. |
+
+So a one-slot worker keeps serving its results while its stream waits, and
+memory in the mailbox is bounded by the window too: at most one item waits
+there per `put`.
+
+### On the wire
+
+| Kind | Sent by | Payload |
+|---|---|---|
+| 36 task-stream | driver to head, head to worker | the window, u64, then the encoded argument |
+| 37 credit | driver to head, head to the stream's worker | how many items the driver has taken, u64 |
+
+| 38 stream-stop | head to the stream's worker | none: the task's next `put` raises `cancelled` |
+
+Items and the end travel as the result, stored and error frames there are.
+An item's frame carries its stream's ID in the task-ID field, which is how
+the head knows whose it is.
+A stream on other tasks' results is a task-after with a `STREAM` flag (8),
+the window following the flags byte as a `TaskMany`'s count does. A head
+from before streams drops a peer that sends kind 36, as it does for any
+kind it doesn't know: a generic `dista head` must be as new as the program.
+
+### Failures
+
+| What happens | What the driver sees |
+|---|---|
+| The task raises after *k* items | The *k* items, then the error from `next`. |
+| Its worker goes away before any item was answered | Nothing: the task runs again elsewhere, within `DISTA_TASK_RETRIES`. |
+| Its worker goes away after an item was answered | The end fails with `worker lost while running this stream, after some of its items were answered`, the rule a `TaskMany` has. Stored items it held are lost with it, as any result is. |
+| `rt.cancel(s)`, or its driver leaves | The task's next `put` raises `cancelled`, so a stream stops where a task can't be stopped. Items already answered stay until released. |
+| Its worker drains | The drain waits for the task, as for any running task; its items move with the worker's other results. |
+| The head restarts | A stream that had not ended fails with `stream interrupted: the head restarted`. Its driver doesn't resubmit it, since items it already took would come again. The driver's replay skips a stream's item IDs rather than walking 2^20 of them. |
+
+Running a failed stream again is its caller's: a flow re-runs the read, and
+morca the step.
+
+### Not in this plan
+
+- **A stream as a task's input.** Its items are refs, and go to tasks one
+  at a time or in a list, as today.
+- **Streams from actors' methods.** A method's result stays one object.
+- **A window in bytes**, and credit that follows `release` rather than
+  `next`.
+
+### PRs
+
+| # | PR | Gate | Size |
+|---|---|---|---|
+| 1 | **`TaskStream`, `Emit`, `rt.stream`, `rt.next`**, with one slot and with several, no window yet: task-stream, the item IDs, the end object, the head counting a running stream's items. | `tests/test_stream.mojo`: 1,000 small items and 20 stored ones arrive in order and exact, on 1 and on 4 slots; the first item is read while the task still runs; an error after 5 items gives 5 items and then the error; an empty stream ends at once; items feed other tasks; `rt.wait` picks the stream with an item among three. | ~900 |
+| 2 | **The window and cancelling**: credit, `put` blocking both ways, `rt.cancel(s)` and a departed driver raising in `put`. | A stream of 10,000 items of 1 MB read at 50 a second keeps its worker under a fixed size; an unread stream stops at `window` items; a one-slot worker serves a fetch while its stream is blocked; a cancelled stream's task ends within a second. | ~600 |
+| 3 | **Failures**: the retry rule, drain, head restart, the `STREAM` flag on task-after, the fuzzers' and `chaos.sh`'s share. | A worker killed before the first item: the stream completes elsewhere. Killed after: the end fails as above. `tests/drain.sh` with a stream running. | ~500 |
+
+### Defaults to confirm
+
+| Default | Proposed | Alternative |
+|---|---|---|
+| Window | 16 items | Ray's is unbounded unless set |
+| What gives credit | `next` returning the item | releasing it, which bounds what's held and not only what's unread |
+| Most items | 2^20 a stream | a second ID range asked of the head when the first runs out |
+| A stream cut by a head restart | fails | the driver resubmits and skips the items it took, which needs tasks to emit the same items in the same order |
