@@ -42,7 +42,9 @@ this doesn't deadlock it.
 
 Every object is reference counted: its driver holds it until it releases it
 (or disconnects), and each submitted task taking it as input holds it until
-that task settles. At zero the head forgets the object and tells the worker
+that task settles. A driver releases an object only once the tasks it
+submitted on it have settled on its side, so a head that restarts before
+their answers arrive still has the input when they run again. At zero the head forgets the object and tells the worker
 holding it, if one does, to delete it. An object released before its task
 finishes is freed when the task settles.
 

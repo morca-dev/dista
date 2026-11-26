@@ -550,6 +550,13 @@ struct Client(Movable):
     var _streams: Dict[UInt64, Bool]
     """Every stream this client submitted, by its own ID: a resume skips the
     IDs set aside for its items, and fails it if it hadn't ended."""
+    var _release_due: Dict[UInt64, Bool]
+    """Objects released while tasks submitted here still take them: the head
+    is told once those tasks have settled here (`_settle`), not before. Told
+    sooner, it frees one once its tasks run; if it then restarts before
+    their answers come, the tasks run again on an input nobody has."""
+    var _releases: List[UInt64]
+    """Releases due, to send with the next frame (`_flush_releases`)."""
 
     def __init__(
         out self,
@@ -596,6 +603,8 @@ struct Client(Movable):
         self._kept_calls = Dict[UInt64, _Submission]()
         self._driver_spans = List[_DriverSpan]()
         self._streams = Dict[UInt64, Bool]()
+        self._release_due = Dict[UInt64, Bool]()
+        self._releases = List[UInt64]()
 
     def close(mut self):
         """Hangs up on the head: everything this client held is released."""
@@ -962,6 +971,7 @@ struct Client(Movable):
     ) raises:
         # Refused here, before it's recorded: no frame carries it.
         check_payload(len(payload))
+        self._flush_releases()
         for d in deps:
             self._dependents[d] = self._dependents.get(d, 0) + 1
         self._live[id] = True
@@ -979,6 +989,7 @@ struct Client(Movable):
 
     def _send(mut self, kind: UInt8, id: UInt64, payload: List[UInt8]) raises:
         """Sends a frame to the head, resuming with a new head if it's gone."""
+        self._flush_releases()
         var out = List[UInt8]()
         append_frame(out, kind, id, 0, payload)
         try:
@@ -1021,6 +1032,22 @@ struct Client(Movable):
             _ = self._dependents.pop(d, 0)
             if d in self._released:
                 self._drop_local(d)
+                if self._release_due.pop(d, False):
+                    self._releases.append(d)
+
+    def _flush_releases(mut self) raises:
+        """Sends the releases `_settle` found due. Those objects are gone
+        here already, so a resume needn't send them again."""
+        if len(self._releases) == 0:
+            return
+        var out = List[UInt8]()
+        for id in self._releases:
+            append_frame(out, KIND_RELEASE, id, 0, List[UInt8]())
+        self._releases.clear()
+        try:
+            self._write(out)
+        except e:
+            self._resume(e)
 
     def _forget_calls(mut self, actor: UInt64, upto: UInt64):
         """Stops keeping the calls to `actor` up to object `upto`: a
@@ -1097,13 +1124,12 @@ struct Client(Movable):
             raise Error("the restarted head didn't welcome this driver back")
         # Oldest first, so every task's inputs are back before it is, and
         # every actor before its calls.
-        var released_items = List[UInt64]()
         var n = 0
         while n < Int(self._counter):
             n += 1
             var id = (self._driver << DRIVER_SHIFT) | UInt64(n)
             if id in self._streams:
-                self._replay_stream(id, released_items)
+                self._replay_stream(id)
                 n += ITEMS_PER_STREAM
                 continue
             if id in self._creates:
@@ -1138,14 +1164,8 @@ struct Client(Movable):
             0,
             List[UInt8](),
         )
-        # Released objects came back only for the tasks that need them.
-        for entry in self._live.items():
-            if entry.key in self._released:
-                write_frame(
-                    self._head, KIND_RELEASE, entry.key, 0, List[UInt8]()
-                )
-        for id in released_items:
-            write_frame(self._head, KIND_RELEASE, id, 0, List[UInt8]())
+        # Released objects came back only for the tasks that need them, and
+        # are released once those settle here (`_release_due`).
 
     def _replay_held(mut self, id: UInt64) raises -> Bool:
         """Gives a restarted head `id` back if it has settled: a small result
@@ -1169,13 +1189,11 @@ struct Client(Movable):
             return False
         return True
 
-    def _replay_stream(mut self, id: UInt64, mut released: List[UInt64]) raises:
+    def _replay_stream(mut self, id: UInt64) raises:
         """Gives a restarted head stream `id` back: the items held here, and
         its end. A stream that hadn't ended fails, and isn't sent again:
         the items its driver took would come twice. Only the items held
-        here are looked at, not the `ITEMS_PER_STREAM` IDs. Those released
-        but kept for a task that takes them go in `released`, to release
-        once that task is back."""
+        here are looked at, not the `ITEMS_PER_STREAM` IDs."""
         if id in self._live and not self._settled(id):
             self._errors[id] = String("stream interrupted: the head restarted")
             self._settle(id)
@@ -1198,8 +1216,6 @@ struct Client(Movable):
             if k > 0 and items[k] == items[k - 1]:
                 continue
             _ = self._replay_held(items[k])
-            if items[k] in self._released:
-                released.append(items[k])
         if id in self._live:
             _ = self._replay_held(id)
 
@@ -1217,6 +1233,7 @@ struct Client(Movable):
             self._resume(Error("the head closed the connection"))
             return
         self._take(f.take())
+        self._flush_releases()
 
     def _take(mut self, var frame: Frame) raises:
         """Handles a frame from the head."""
@@ -1455,10 +1472,12 @@ struct Client(Movable):
         if r.id in self._released:
             return
         self._released[r.id] = True
-        if self._dependents.get(r.id, 0) == 0:
-            self._drop_local(r.id)
-        # Otherwise its copy stays here until the tasks that take it settle:
-        # a restarted head would need it back.
+        if self._dependents.get(r.id, 0) > 0:
+            # Its copy stays here, and the head keeps it, until the tasks
+            # that take it settle here: a restarted head would need it back.
+            self._release_due[r.id] = True
+            return
+        self._drop_local(r.id)
         self._send(KIND_RELEASE, r.id, List[UInt8]())
 
     def release[R: AnyType](mut self, refs: List[ObjectRef[R]]) raises:

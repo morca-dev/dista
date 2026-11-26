@@ -589,6 +589,12 @@ stream in `tests/chaos.sh`'s workload). What differs from the plan:
   old connection, since the driver closed it unread. The head-restart test
   hit this once its stream sent credit first; the driver now reads what's
   left before it reconnects.
+- **A released input** stayed held at the driver for its unsettled tasks, but
+  the head was told at once, and freed it as soon as those tasks ran. If the
+  head then died before their answers came, the resumed driver claimed an
+  input no worker had, and the tasks waited for ever. Reading what's left
+  made that likely: `chaos.sh` seed 2 hung on Linux. The driver now sends
+  the release once those tasks have settled on its side.
 - **A stream parked for its inputs** on a worker now starts halted if the
   head stops it meanwhile, as one waiting to start already did.
 
