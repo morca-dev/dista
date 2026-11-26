@@ -2,7 +2,7 @@
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
 name = "dista.mojo"
-version = "0.6.1"
+version = "0.6.2"
 description = "Distributed tasks for Mojo: mark a function remote, call it, and the work runs across a cluster."
 preview = ["pixi-build"]
 # linux-aarch64 lets the container image build natively on ARM hosts, such as
@@ -64,7 +64,7 @@ bench-fetch = { cmd = "scripts/mojo-build.sh -I src $DEP_INC bench/fetch.mojo -o
 
 [package]
 name = "dista-mojo"
-version = "0.6.1"
+version = "0.6.2"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -77,20 +77,20 @@ extra-args = ["-I", "$PREFIX/lib/mojo"]
 
 [package.host-dependencies]
 mojo-compiler = "==1.3.0.dev2026112605"
-arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "fe045a5db79acb15e20269f230397953a47c47dc" }
-memory-region-mojo = { git = "https://github.com/magmalake/memory-region.mojo", rev = "f1cf3cb32c33ad52a65e8efdb891a17e8f99731b" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "e4b8d49c69e0e50aafe7f737c46df9026c3e52c9" }
-threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "d86b368e4aabb3c9a09b0f54d117230a404e4258" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "a6a3d3072810d4b502be35ddb7bccda07ddc6b01" }
+memory-region-mojo = { git = "https://github.com/magmalake/memory-region.mojo", rev = "308a48360005009c8b1e72d261d784018694d1fd" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ca8cdac533b2a155e83233d97146fc0267c642ad" }
+threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "215abd5c3fd47e38ef14b44fd32dceb6059c134f" }
 
 [package.build-dependencies]
 mojo-compiler = "==1.3.0.dev2026112605"
 
 [package.run-dependencies]
 mojo-compiler = "==1.3.0.dev2026112605"
-arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "fe045a5db79acb15e20269f230397953a47c47dc" }
-memory-region-mojo = { git = "https://github.com/magmalake/memory-region.mojo", rev = "f1cf3cb32c33ad52a65e8efdb891a17e8f99731b" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "e4b8d49c69e0e50aafe7f737c46df9026c3e52c9" }
-threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "d86b368e4aabb3c9a09b0f54d117230a404e4258" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "a6a3d3072810d4b502be35ddb7bccda07ddc6b01" }
+memory-region-mojo = { git = "https://github.com/magmalake/memory-region.mojo", rev = "308a48360005009c8b1e72d261d784018694d1fd" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ca8cdac533b2a155e83233d97146fc0267c642ad" }
+threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "215abd5c3fd47e38ef14b44fd32dceb6059c134f" }
 
 # One toolchain: the tin, its tests and every consumer use the same Mojo
 # nightly. A precompiled Mojo package (.mojoc) loads only in the compiler
@@ -101,15 +101,15 @@ threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "d86b3
 mojo-compiler = "==1.3.0.dev2026112605"
 # memory-region backs the node-local object store: large results go into
 # shared mappings that other processes on the same host map by path.
-memory-region-mojo = { git = "https://github.com/magmalake/memory-region.mojo", rev = "f1cf3cb32c33ad52a65e8efdb891a17e8f99731b" }
+memory-region-mojo = { git = "https://github.com/magmalake/memory-region.mojo", rev = "308a48360005009c8b1e72d261d784018694d1fd" }
 # arrow-mlake carries columnar results: a task can take or return a
 # RecordBatch, and it travels as an Arrow IPC stream.
-arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "fe045a5db79acb15e20269f230397953a47c47dc" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "a6a3d3072810d4b502be35ddb7bccda07ddc6b01" }
 # objectstore writes actor checkpoints to DISTA_CHECKPOINT_URI, a local
 # directory or s3://. The same revision as the data environment's.
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "e4b8d49c69e0e50aafe7f737c46df9026c3e52c9" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ca8cdac533b2a155e83233d97146fc0267c642ad" }
 # threads runs a worker's tasks on DISTA_WORKER_SLOTS threads.
-threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "d86b368e4aabb3c9a09b0f54d117230a404e4258" }
+threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "215abd5c3fd47e38ef14b44fd32dceb6059c134f" }
 
 # DEP_INC holds the include flags for the tins dista imports: here they are
 # the packages above, so it adds nothing; the data environment compiles them
@@ -138,12 +138,12 @@ format-check = { cmd = "mojo format src tests bench examples deploy fuzz cli && 
 # the package is what installs the C shim each one links.
 [feature.data.dependencies]
 mojo-compiler = "==1.3.0.dev2026112605"
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "e4b8d49c69e0e50aafe7f737c46df9026c3e52c9" }
-zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo", rev = "2936d2023ff8654954c5ce37431f4086f0fc08f3" }
-lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "7845abe6cbac22d68663e81103054c3d6570746e" }
-brotli-mojo = { git = "https://github.com/magmalake/brotli.mojo", rev = "2bded496a5d7ec724e1c1c3f8fae53fe54418c89" }
-sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "3885ba57fb97c04e08fea2678e683b76fd8d00c4" }
-postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "e9afc56cc1b6ba8df0eae5cd6f950d75e73b756c" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ca8cdac533b2a155e83233d97146fc0267c642ad" }
+zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo", rev = "09ad0248af6713406ccdbf843301b47733fa55f3" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "c239ce5c7be0a80a9e58f1fb2d2d1399c99f4500" }
+brotli-mojo = { git = "https://github.com/magmalake/brotli.mojo", rev = "fafcaf4f303fe297c0f43b99fcf420591ad9afb8" }
+sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "604d1da685f170f895d93197c4ef0aa2f3dfb30d" }
+postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "7cff96daa58ec2b2d479ca8b57ba14c15f80ea75" }
 libcurl = ">=8,<9"
 libsqlite = ">=3.45,<4"
 libpq = ">=16,<19"
@@ -164,7 +164,7 @@ bench-readpath = { cmd = "scripts/mojo-build.sh -I src $DEP_INC bench/readpath.m
 # first, so a hard abort still leaves the crashing input behind; mozz saves
 # the ones it catches to build/fuzz-crashes/. FUZZ_RUNS sets the iterations.
 [feature.fuzz.dependencies]
-mozz_mlake = { git = "https://github.com/magmalake/mozz_mlake.git", rev = "578766e2c576b7b1fde474724417025d19562f45" }
+mozz_mlake = { git = "https://github.com/magmalake/mozz_mlake.git", rev = "9978397c54f352a9fc9047cb5f6df7ecaf4389f3" }
 
 [feature.fuzz.tasks]
 fuzz-frames = { cmd = "scripts/mojo-build.sh -D ASSERT=all -I src $DEP_INC fuzz/fuzz_frames.mojo -o build/fuzz-frames && ./build/fuzz-frames" }
