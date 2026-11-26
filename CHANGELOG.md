@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-26
+
+### Changed
+
+- Pins arrow-mlake-mojo 0.4.2, brotli-mojo 0.2.2, lz4-mojo 0.2.2, memory-region-mojo 0.2.2, mozz_mlake 0.2.5, objectstore-mojo 0.5.2, postgres-mojo 0.4.2, sqlite-mojo 0.4.2, threads-mojo 0.7.2, zstd-mojo 0.4.0.
+
 ## [0.6.1] - 2026-11-25
 
 ### Changed
