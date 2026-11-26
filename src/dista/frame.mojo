@@ -47,6 +47,8 @@ Every frame is a 4-byte little-endian length, then that many bytes:
 | 34 auth | any process to a head or a worker's object server, first on the connection | the cluster token's bytes (`dista.auth`, only with `DISTA_TOKEN` set) |
 | 35 capacity | worker to head | the tasks it has room to run now, u64 (see `KIND_CAPACITY`) |
 | 36 task-stream | driver to head, head to worker | the window u64, then the encoded argument; the object ID is the stream's end, and its items are the IDs after it |
+| 37 credit | driver to head, head to the stream's worker | how many of the stream's items the driver has taken, u64, a running total; the object ID is the stream's |
+| 38 stream-stop | head to the stream's worker | none: the stream's task's next `put` raises "cancelled" |
 
 A frame holds at most `MAX_FRAME` bytes, so a result larger than that
 crosses hosts in parts. A fetcher says it takes parts by putting the largest
@@ -110,7 +112,12 @@ stream's ID plus 1 plus `k`, and the driver sets aside the 2^20 IDs after the
 stream's. When the task ends, the worker answers the stream's own ID with
 the number of items, an encoded `Int`, or with the task's error: its items
 always come before it. The window is how many items may be put and not yet
-read; the head and the worker carry it, and nothing enforces it yet.
+read (0, any): a `put` with that many unread waits for a credit frame. The
+driver sends one as `next` returns items, with the number it has taken so
+far, so a lost or repeated credit is harmless, and the head passes it to the
+stream's worker. A stream-stop frame, which the head sends when the stream's
+driver cancels it, releases it before it ended or leaves, makes the task's
+next `put`, or the one waiting, raise "cancelled".
 
 The head counts references to every object: its driver's, until a release,
 and one per submitted task that takes it as input, until that task settles.
@@ -174,6 +181,13 @@ that announced it reads it, with a `KIND_FREE` of object 0."""
 comptime KIND_TASK_STREAM: UInt8 = 36
 """Driver to head, head to worker: run a `TaskStream`. The payload is the
 window, u64, then the encoded argument; the object ID is the stream's end."""
+comptime KIND_CREDIT: UInt8 = 37
+"""Driver to head, head to the stream's worker: how many of the stream's
+items the driver has taken, a u64 running total; the object ID is the
+stream's. The head drops it for a stream that isn't running."""
+comptime KIND_STREAM_STOP: UInt8 = 38
+"""Head to the stream's worker, no payload: the stream's driver cancelled
+it, released it or left, so the task's next `put` raises "cancelled"."""
 comptime GATHER: UInt8 = 1
 """Task-after and task-inputs flag: the inputs gather into a `Seq`."""
 comptime WITH_VALUE: UInt8 = 2

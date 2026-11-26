@@ -24,6 +24,15 @@ more it leaves it in its slot's mailbox for the loop (`executors.mojo`).
 Each item's frame carries the stream's ID as its task ID, and the stream's
 end, the number of items or the task's error, goes last.
 
+A stream's `put` waits while its window is full, until a credit from the
+head says the driver has taken more. With one slot it waits on the loop's
+thread by running the loop's I/O itself (`_poll_once`: the head, fetches,
+peers, `/metrics`), so this worker keeps serving its results; `run` alone
+starts tasks, so none starts and none is re-entered meanwhile. With more
+slots it waits on its slot's condition, and the loop passes credits on
+(`Executors.credit`). A stream-stop from the head makes the next `put`, or
+the one waiting, raise "cancelled".
+
 A result here lives until the head says free, once nothing references it.
 Inputs fetched from peers are copies, kept only until the tasks waiting on
 them have their arguments.
@@ -83,6 +92,8 @@ from dista.frame import (
     KIND_TASK_INPUTS,
     KIND_TASK_MANY,
     KIND_TASK_STREAM,
+    KIND_CREDIT,
+    KIND_STREAM_STOP,
     GATHER,
     WITH_VALUE,
     MANY,
@@ -508,6 +519,21 @@ struct Worker[
     """Head connections so far: a task started under an earlier one is
     dropped when it ends, since that head's gone and its driver resubmits
     it."""
+    var _stream: UInt64
+    """With one slot, the stream running on the loop's thread; else 0."""
+    var _window: Int
+    """Its window; 0, any."""
+    var _taken: Int
+    """How many of its items its driver has taken, as the last credit said."""
+    var _halted: Bool
+    """It was stopped: its next `put` raises "cancelled"."""
+    var _putting: Bool
+    """With one slot, a stream's `put` is running the loop's I/O while the
+    window is full: no task may start until it returns."""
+    var _stream_slots: Dict[UInt64, Int]
+    """With slots, each running stream's slot, for its credits and stop."""
+    var _stops: Dict[UInt64, Bool]
+    """Streams stopped while still waiting in `_ready`: they start halted."""
 
     def __init__(
         out self,
@@ -596,6 +622,13 @@ struct Worker[
         self._adopted = 0
         self.stopped = False
         self._epoch = 0
+        self._stream = 0
+        self._window = 0
+        self._taken = 0
+        self._halted = False
+        self._putting = False
+        self._stream_slots = Dict[UInt64, Int]()
+        self._stops = Dict[UInt64, Bool]()
         self._pool = None
         if self._slots > 1:
             self._pool = Executors[Self.dispatch](
@@ -631,6 +664,12 @@ struct Worker[
         self._admit = 0
         self._end_actor()
         self._ready.clear()
+        # The old head's streams have no reader now, and would wait for
+        # credit for ever: stop them, and their ends are dropped.
+        for entry in self._stream_slots.items():
+            self._pool.value().halt(entry.value)
+        self._stream_slots.clear()
+        self._stops.clear()
         self._parked.clear()
         self._requested.clear()
         self._parts.clear()
@@ -916,6 +955,14 @@ struct Worker[
             var pos = 0
             var loc = Location.decode(f.payload, pos)
             self._adopt(f.object_id, loc)
+        elif f.kind == KIND_CREDIT:
+            if len(f.payload) != 8:
+                raise Error("a credit must be one u64")
+            var pos = 0
+            var taken = Int(get_scalar[DType.uint64](f.payload, pos))
+            self._credit(f.object_id, taken)
+        elif f.kind == KIND_STREAM_STOP:
+            self._stop_stream(f.object_id)
         elif f.kind == KIND_FREE and f.object_id == CAPACITY_ANNOUNCE:
             # Object 0 names nothing: the head reads `KIND_CAPACITY`.
             self._head_reads_capacity = True
@@ -931,6 +978,37 @@ struct Worker[
             )
         else:
             raise Error("worker got frame kind ", Int(f.kind), " from the head")
+
+    def _credit(mut self, stream: UInt64, taken: Int):
+        """Stream `stream`'s driver has taken `taken` of its items: a `put`
+        waiting for the window may go on. For a stream not running here, it
+        changes nothing."""
+        if stream == self._stream and stream != 0:
+            self._taken = max(self._taken, taken)
+        elif stream in self._stream_slots:
+            self._pool.value().credit(self._stream_slots.get(stream, 0), taken)
+
+    def _stop_stream(mut self, stream: UInt64):
+        """The head says nobody reads stream `stream`: its next `put`, or the
+        one waiting, raises "cancelled". One still in `_ready` starts
+        halted; one not here is done already."""
+        if stream == self._stream and stream != 0:
+            self._halted = True
+        elif stream in self._stream_slots:
+            self._pool.value().halt(self._stream_slots.get(stream, 0))
+        else:
+            for k in range(len(self._ready)):
+                if (
+                    self._ready[k].object_id == stream
+                    and self._ready[k].kind == KIND_TASK_STREAM
+                ):
+                    self._stops[stream] = True
+
+    @staticmethod
+    def _window_of(args: Span[UInt8, _]) raises -> Int:
+        """A task-stream payload's window, the u64 before its argument."""
+        var pos = 0
+        return Int(get_scalar[DType.uint64](args, pos))
 
     def _request(mut self, obj: UInt64, ip: Array[UInt8, 4], port: Int) raises:
         """Starts fetching `obj` from the worker at `ip:port`, once."""
@@ -1803,6 +1881,8 @@ struct Worker[
         ones, in order. An actor frame runs here, on the loop, as with one
         slot, so an actor's calls still run one at a time, in order; then
         the loop polls again."""
+        if self._putting:
+            return
         while len(self._ready) > 0:
             var kind = self._ready[0].kind
             if not Self._on_slot(kind):
@@ -1815,6 +1895,7 @@ struct Worker[
                 self._tell_room()
                 return
             var t = self._ready.pop(0)
+            var window = 0
             if not self._prepare(t):
                 continue
             if kind == KIND_TASK and t.object_id in self._files:
@@ -1835,12 +1916,14 @@ struct Worker[
                 var rest = List[UInt8](args[8:])
                 args = rest^
             elif kind == KIND_TASK_STREAM:
-                # The window goes first; nothing enforces it yet.
+                # The window goes first.
                 if len(args) < 8:
                     self._report_error(t.object_id, "a truncated TaskStream")
                     continue
+                window = Self._window_of(args)
                 var rest = List[UInt8](args[8:])
                 args = rest^
+                self._stream_slots[t.object_id] = slot
             if self._inflight:
                 self._learned.started(
                     t.object_id, t.task_id, self._resident.now()
@@ -1855,7 +1938,9 @@ struct Worker[
                     args^,
                     many,
                     self._epoch,
+                    window,
                 ),
+                halted=self._stops.pop(t.object_id, False),
             )
             if self._sizing:
                 self._sizing.value().started(self._pool.value().running())
@@ -1876,6 +1961,8 @@ struct Worker[
             self._sizing.value().finished()
         while len(done) > 0:
             var j = done.pop(0)
+            if j.kind == KIND_TASK_STREAM:
+                _ = self._stream_slots.pop(j.object_id, 0)
             if self._inflight:
                 self._learned.finished(j.object_id, resident_bytes())
                 self._sizing.value().learned = self._learned.most()
@@ -1914,6 +2001,8 @@ struct Worker[
                 self._report_error(j.object_id, j.error)
 
     def _run_one(mut self) raises:
+        if self._putting:
+            return  # a stream on this thread waits in `put`: it runs first
         var t = self._ready.pop(0)
         if not self._prepare(t):
             return
@@ -1980,9 +2069,18 @@ struct Worker[
             self._span(t.object_id, t.arrived, started)
             self._report_error(t.object_id, "a truncated TaskStream")
             return
-        # The window goes first; nothing enforces it yet.
+        # The window goes first.
+        var window = 0
+        try:
+            window = Self._window_of(t.args)
+        except:
+            pass
         var args = List[UInt8](t.args[8:])
         t.args = List[UInt8]()
+        self._stream = t.object_id
+        self._window = window
+        self._taken = 0
+        self._halted = self._stops.pop(t.object_id, False)
         self._ctx.stream = StreamSink(
             Int(Pointer(to=self)), 0, t.object_id, Self._put_here
         )
@@ -1993,6 +2091,9 @@ struct Worker[
         except e:
             why = String(e)
         self._ctx.stream = StreamSink()
+        self._stream = 0
+        self._halted = False
+        self._putting = False
         if why:
             self._span(t.object_id, t.arrived, started)
             self._report_error(t.object_id, why)
@@ -2008,9 +2109,41 @@ struct Worker[
         var bytes: List[UInt8],
     ) raises:
         """A one-slot worker's `put`: the task runs on the loop's thread,
-        so it stores and reports the item itself. `target` is the worker."""
+        so it waits for the window there (`_wait_for_room`), then stores and
+        reports the item itself. `target` is the worker."""
         var w = Pointer[Self, MutUntrackedOrigin](unsafe_from_address=target)
+        w[]._wait_for_room(stream, id)
         w[]._item(stream, id, bytes^)
+
+    def _wait_for_room(mut self, stream: UInt64, id: UInt64) raises:
+        """Returns once stream `stream` may put item `id`: while its window
+        is full, it runs the loop's I/O (`_poll_once`) until a credit comes.
+        No task starts meanwhile: only `run` starts them, and `_putting`
+        holds `_run_one` and `_start_some` off. It raises "cancelled" once
+        the stream is stopped, and raises too if the head goes away or a
+        drain runs out of time while it waits."""
+        var put = Int(id - stream - 1)
+        while True:
+            if self._halted:
+                raise Error("cancelled")
+            if self._window == 0 or put - self._taken < self._window:
+                return
+            if self._head.closed:
+                raise Error(
+                    "the head went away while this stream waited for its reader"
+                )
+            if self._draining and wall_ns() >= self._deadline:
+                raise Error(
+                    "DISTA_DRAIN_SECONDS passed while this stream waited for"
+                    " its reader"
+                )
+            var timeout = 100 if self._draining else -1
+            var wait = self._connect_wait_ms()
+            if wait >= 0 and (timeout < 0 or wait < timeout):
+                timeout = wait
+            self._putting = True
+            self._poll_once(timeout_ms=timeout)
+            self._putting = False
 
     def _item(mut self, stream: UInt64, id: UInt64, var bytes: List[UInt8]):
         """Stores and reports item `id` of stream `stream`, as a result of

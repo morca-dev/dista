@@ -397,8 +397,8 @@ struct Runtime[*Ts: TaskLike](Movable):
         object of its own, are read in order with `next`.
 
         `window` is how many items the task may put that `next` hasn't
-        returned (0, any). It travels with the task but isn't enforced yet,
-        so `put` never blocks.
+        returned (0, any): its `put` waits while that many are unread, so a
+        stream nobody reads stops. `cancel(s)` or `release(s)` stops it.
         """
         Self._check_registered[T]()
         return self._c.stream[T](arg, window)
@@ -499,6 +499,11 @@ struct Runtime[*Ts: TaskLike](Movable):
         """Cancels every ref in `refs`."""
         self._c.cancel(refs)
 
+    def cancel[X: AnyType](mut self, s: StreamRef[X]) raises:
+        """Cancels stream `s`, acting on `s.id`: see `Client.cancel`. Its
+        task's next `put` raises "cancelled"."""
+        self._c.cancel(s)
+
     def release[R: AnyType](mut self, r: ObjectRef[R]) raises:
         """Says this driver is done with `r`: see `Client.release`."""
         self._c.release(r)
@@ -506,6 +511,11 @@ struct Runtime[*Ts: TaskLike](Movable):
     def release[R: AnyType](mut self, refs: List[ObjectRef[R]]) raises:
         """Releases every ref in `refs`."""
         self._c.release(refs)
+
+    def release[X: AnyType](mut self, s: StreamRef[X]) raises:
+        """Says this driver is done with stream `s`, acting on `s.id`:
+        releasing one that hasn't ended cancels it. See `Client.release`."""
+        self._c.release(s)
 
     def stats(mut self) raises -> HeadStats:
         """Asks the head what it holds. Frames that arrive first are kept."""
