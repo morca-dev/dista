@@ -9,7 +9,8 @@ payloads. A frame the head rejects drops that peer, as the real loop does.
 After every step the head's bookkeeping must hold together: counts positive,
 every held object counted, every location naming a worker connection,
 every actor's call log holding just the calls its checkpoint doesn't cover,
-and nothing pending for an object that no longer exists.
+every running stream naming a worker connection and a stream not ended, and
+nothing pending for an object that no longer exists.
 
     pixi run -e fuzz fuzz-head
 """
@@ -22,6 +23,7 @@ from dista.codec import put_scalar
 from dista.conn import Conn
 from dista.frame import (
     KIND_HELLO,
+    KIND_STREAM_STOP,
     ROLE_DRIVER,
     ROLE_WORKER,
     Frame,
@@ -59,6 +61,11 @@ def _check(head: Head) raises:
     for i in range(len(head._hosting)):
         if head._hosting[i] != 0 and head._hosting[i] not in head._actors:
             raise Error("assertion failed: worker hosts a gone actor")
+    for entry in head._stream_at.items():
+        if entry.value < 0 or entry.value >= len(head._conns):
+            raise Error("assertion failed: a stream runs on no connection")
+        if entry.key not in head._streams:
+            raise Error("assertion failed: a stream runs, ended or unknown")
     for entry in head._deps_of.items():
         if entry.key not in head._refs and entry.key not in head._dead:
             raise Error("assertion failed: inputs held for a gone object")
@@ -86,14 +93,18 @@ def target(data: List[UInt8]) raises:
     var alive: List[Bool] = [True, True]
 
     # Each step: who (bit 0) and whether it hangs up (bit 1), kind, object,
-    # task, payload length, payload.
+    # task (an object with its top bit set), payload length, payload.
     var pos = 0
     while pos + 5 <= len(data):
         var who = Int(data[pos] & 1)
         var hang_up = (data[pos] & 2) != 0
-        var kind = data[pos + 1] % 29
+        var kind = data[pos + 1] % (KIND_STREAM_STOP + 1)
         var obj = (UInt64(1) << DRIVER_SHIFT) | UInt64(data[pos + 2] % 16)
+        # A task type, or with the top bit set an object, as a stream's
+        # item frames carry their stream's ID.
         var task = UInt64(data[pos + 3] % 4)
+        if data[pos + 3] >= 128:
+            task = (UInt64(1) << DRIVER_SHIFT) | UInt64(data[pos + 3] % 16)
         var n = min(Int(data[pos + 4]), len(data) - pos - 5)
         var payload = List[UInt8](Span(data)[pos + 5 : pos + 5 + n])
         pos += 5 + n
@@ -198,6 +209,15 @@ def main() raises:
         33,
     ]
     seeds.append(second^)
+    # A task-stream (36) on object 1 with a window of 4, the worker answers
+    # its item 2 (task 129 names object 1), the driver credits it (37) and
+    # cancels it (32), and the worker answers its end.
+    var third: List[UInt8] = [0, 36, 1, 0, 8, 4, 0, 0, 0, 0, 0, 0, 0]
+    third.extend([UInt8(1), 2, 2, 129, 1, 9])
+    third.extend([UInt8(0), 37, 1, 0, 8, 1, 0, 0, 0, 0, 0, 0, 0])
+    third.extend([UInt8(0), 32, 1, 0, 0])
+    third.extend([UInt8(1), 2, 1, 0, 1, 1])
+    seeds.append(third^)
     fuzz(
         target,
         FuzzConfig(

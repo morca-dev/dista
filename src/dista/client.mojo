@@ -47,6 +47,7 @@ from dista.frame import (
     GATHER,
     WITH_VALUE,
     MANY,
+    STREAM,
     KIND_TIMELINE,
     KIND_WELCOME,
     ROLE_CLIENT,
@@ -546,6 +547,9 @@ struct Client(Movable):
     """Calls to actors that no checkpoint includes yet: a restarted head
     restores the actor from its checkpoint and these run again."""
     var _driver_spans: List[_DriverSpan]
+    var _streams: Dict[UInt64, Bool]
+    """Every stream this client submitted, by its own ID: a resume skips the
+    IDs set aside for its items, and fails it if it hadn't ended."""
 
     def __init__(
         out self,
@@ -591,6 +595,7 @@ struct Client(Movable):
         self._creates = Dict[UInt64, _Submission]()
         self._kept_calls = Dict[UInt64, _Submission]()
         self._driver_spans = List[_DriverSpan]()
+        self._streams = Dict[UInt64, Bool]()
 
     def close(mut self):
         """Hangs up on the head: everything this client held is released."""
@@ -752,6 +757,10 @@ struct Client(Movable):
         `window` is how many items the task may put that `next` hasn't
         returned (0, any): its `put` waits while that many are unread. The
         stream's ID and the `ITEMS_PER_STREAM` after it are its own.
+
+        A stream that hasn't ended when the head restarts fails with
+        "stream interrupted: the head restarted", after the items that had
+        come: it isn't sent again, since the items taken would come twice.
         """
         if window < 0:
             raise Error("a stream's window can't be negative, got ", window)
@@ -761,7 +770,27 @@ struct Client(Movable):
         var id = self._new_id()
         # Item `k` is `id + 1 + k`: no other object takes those IDs.
         self._counter += UInt64(ITEMS_PER_STREAM)
+        self._streams[id] = True
         self._submit(id, KIND_TASK_STREAM, T.id(), body^, List[UInt64]())
+        return StreamRef[T.Item](id, window)
+
+    def stream[
+        T: StreamLike
+    ](mut self, arg: ObjectRef[T.A], window: Int = 16) raises -> StreamRef[
+        T.Item
+    ]:
+        """Submits task `T`, a `TaskStream`, to run on another task's result
+        once it exists: a task-after with the `STREAM` flag."""
+        if window < 0:
+            raise Error("a stream's window can't be negative, got ", window)
+        var body: List[UInt8] = [STREAM]
+        put_scalar[DType.uint64](body, UInt64(window))
+        put_scalar[DType.uint64](body, 1)
+        put_scalar[DType.uint64](body, arg.id)
+        var id = self._new_id()
+        self._counter += UInt64(ITEMS_PER_STREAM)
+        self._streams[id] = True
+        self._submit(id, KIND_TASK_AFTER, T.id(), body^, [arg.id])
         return StreamRef[T.Item](id, window)
 
     def next[
@@ -1026,6 +1055,16 @@ struct Client(Movable):
             raise cause.copy()
         print("dista driver: lost the head (", cause, "), resuming")
         self._resumes += 1
+        # What the old head sent before it went is still readable here, as
+        # when a send fails first: take it, or the answers in it are lost.
+        try:
+            while poll_readable([self._head.fd], 0)[0]:
+                var f = read_frame(self._head)
+                if not f:
+                    break
+                self._take(f.take())
+        except:
+            pass
         while True:
             # Raises once the head has been unreachable for
             # DISTA_CONNECT_TIMEOUT seconds.
@@ -1058,8 +1097,15 @@ struct Client(Movable):
             raise Error("the restarted head didn't welcome this driver back")
         # Oldest first, so every task's inputs are back before it is, and
         # every actor before its calls.
-        for n in range(1, Int(self._counter) + 1):
+        var released_items = List[UInt64]()
+        var n = 0
+        while n < Int(self._counter):
+            n += 1
             var id = (self._driver << DRIVER_SHIFT) | UInt64(n)
+            if id in self._streams:
+                self._replay_stream(id, released_items)
+                n += ITEMS_PER_STREAM
+                continue
             if id in self._creates:
                 # Its checkpoint, if it has one, is in object storage: the
                 # new head restores it from there.
@@ -1074,20 +1120,8 @@ struct Client(Movable):
                     write_frame(self._head, c.kind, id, c.task_id, c.payload)
                     write_frame(self._head, KIND_RELEASE, id, 0, List[UInt8]())
                 continue
-            if id in self._results:
-                write_frame(self._head, KIND_RESULT, id, 0, self._results[id])
-            elif id in self._errors:
-                write_frame(
-                    self._head, KIND_ERROR, id, 0, self._errors[id].as_bytes()
-                )
-            elif id in self._located or id in self._claimed:
-                write_frame(self._head, KIND_CLAIM, id, 0, List[UInt8]())
-                # Where it was may be stale: a task run twice across restarts
-                # leaves copies, and the new head may keep the other one. It
-                # says where it has the result in reply; until then the claim
-                # stands, through further restarts.
-                _ = self._located.pop(id, List[UInt8]())
-                self._claimed[id] = True
+            if self._replay_held(id):
+                pass
             elif id in self._subs:
                 ref sub = self._subs[id]
                 write_frame(self._head, sub.kind, id, sub.task_id, sub.payload)
@@ -1110,6 +1144,64 @@ struct Client(Movable):
                 write_frame(
                     self._head, KIND_RELEASE, entry.key, 0, List[UInt8]()
                 )
+        for id in released_items:
+            write_frame(self._head, KIND_RELEASE, id, 0, List[UInt8]())
+
+    def _replay_held(mut self, id: UInt64) raises -> Bool:
+        """Gives a restarted head `id` back if it has settled: a small result
+        or error as it is, a result on a worker as a claim. False if it
+        hasn't."""
+        if id in self._results:
+            write_frame(self._head, KIND_RESULT, id, 0, self._results[id])
+        elif id in self._errors:
+            write_frame(
+                self._head, KIND_ERROR, id, 0, self._errors[id].as_bytes()
+            )
+        elif id in self._located or id in self._claimed:
+            write_frame(self._head, KIND_CLAIM, id, 0, List[UInt8]())
+            # Where it was may be stale: a task run twice across restarts
+            # leaves copies, and the new head may keep the other one. It
+            # says where it has the result in reply; until then the claim
+            # stands, through further restarts.
+            _ = self._located.pop(id, List[UInt8]())
+            self._claimed[id] = True
+        else:
+            return False
+        return True
+
+    def _replay_stream(mut self, id: UInt64, mut released: List[UInt64]) raises:
+        """Gives a restarted head stream `id` back: the items held here, and
+        its end. A stream that hadn't ended fails, and isn't sent again:
+        the items its driver took would come twice. Only the items held
+        here are looked at, not the `ITEMS_PER_STREAM` IDs. Those released
+        but kept for a task that takes them go in `released`, to release
+        once that task is back."""
+        if id in self._live and not self._settled(id):
+            self._errors[id] = String("stream interrupted: the head restarted")
+            self._settle(id)
+        var items = List[UInt64]()
+        var last = id + UInt64(ITEMS_PER_STREAM)
+        for entry in self._results.items():
+            if entry.key > id and entry.key <= last:
+                items.append(entry.key)
+        for entry in self._errors.items():
+            if entry.key > id and entry.key <= last:
+                items.append(entry.key)
+        for entry in self._located.items():
+            if entry.key > id and entry.key <= last:
+                items.append(entry.key)
+        for entry in self._claimed.items():
+            if entry.key > id and entry.key <= last:
+                items.append(entry.key)
+        sort(items)
+        for k in range(len(items)):
+            if k > 0 and items[k] == items[k - 1]:
+                continue
+            _ = self._replay_held(items[k])
+            if items[k] in self._released:
+                released.append(items[k])
+        if id in self._live:
+            _ = self._replay_held(id)
 
     def _settled(self, id: UInt64) -> Bool:
         return id in self._results or id in self._errors or id in self._located

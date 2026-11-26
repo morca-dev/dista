@@ -11,7 +11,9 @@
 # idle seconds growing for workers with nothing to do, and the six slow tasks
 # running.
 # Then an actor's worker: the actor moves from a checkpoint, with no call run
-# twice and no restart.
+# twice and no restart. In the SIGTERM runs a stream runs too, and the
+# drained worker is the one running it: the drain waits for it, and its
+# items move with the other results.
 set -euo pipefail
 mkdir -p build
 scripts/mojo-build.sh -I src ${DEP_INC:--I src} tests/drain_driver.mojo -o build/drain-driver
@@ -64,12 +66,18 @@ run() {
     fi
     grep -q 'no worker at 192.0.2.1:9' "$log-nobody.log" || { echo "FAIL ($name): $(cat "$log-nobody.log")"; exit 1; }
   fi
-  DISTA_SHM=$shm DRAIN_GO="$log.go" DISTA_HEAD=localhost:$port ./build/drain-driver > "$log-driver.log" 2>&1 &
+  local streaming=0
+  [ "$how" = sigterm ] && streaming=1
+  DISTA_SHM=$shm DRAIN_STREAM=$streaming DRAIN_GO="$log.go" DISTA_HEAD=localhost:$port ./build/drain-driver > "$log-driver.log" 2>&1 &
   local driver=$!; pids+=($driver)
   for _ in $(seq 300); do grep -q '^READY' "$log-driver.log" && break; sleep 0.1; done
   grep -q '^READY' "$log-driver.log" || { echo "FAIL: the driver never got ready"; cat "$log-driver.log"; exit 1; }
 
   local victim=${workers[0]}
+  if [ $streaming = 1 ]; then
+    victim=$(sed -n 's/^STREAM //p' "$log-driver.log")
+    [[ " ${workers[*]} " == *" $victim "* ]] || { echo "FAIL ($name): the stream ran on '$victim', no worker"; exit 1; }
+  fi
   if [ "$how" = name ]; then
     local demand
     demand=$(field "$port" 's["tasks_ready"], s["tasks_waiting"], s["tasks_running"]')

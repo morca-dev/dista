@@ -16,7 +16,7 @@ Every frame is a 4-byte little-endian length, then that many bytes:
 | 3 error | worker to head, head to driver | a UTF-8 message |
 | 4 hello | driver, worker or observer to head | role byte (`ROLE_*`), the registry hash u64 (an observer's is ignored); a worker adds its object server's address |
 | 5 welcome | head to driver | the driver's number, u64, then the head's epoch, u64 |
-| 6 task-after | driver to head | flags byte (`GATHER`, `WITH_VALUE`), count u64, then that many object IDs; with `WITH_VALUE`, a length u64 and the encoded value |
+| 6 task-after | driver to head | flags byte (`GATHER`, `WITH_VALUE`, `MANY`, `STREAM`), with `MANY` the result count u64 or with `STREAM` the window u64, count u64, then that many object IDs; with `WITH_VALUE`, a length u64 and the encoded value |
 | 7 stored | worker to head | the result's size, u64: it stayed on the worker |
 | 8 located | head to driver | the address of the worker holding the result |
 | 9 fetch | driver or worker to a worker | none, or the largest part the fetcher takes, u64: send that object back as a result frame, or if it's larger than that part, as part frames |
@@ -72,8 +72,9 @@ epoch, is the same driver on a new connection: the old one is dropped. It
 then sends, in order of
 submission, each object it still needs: a small result or error back as a
 result or error frame, a result on a worker as claim, and an unfinished task
-as the task or task-after frame it first sent; then resumed. A rejoining
-worker sends holding.
+as the task or task-after frame it first sent; then resumed. A stream that
+hadn't ended isn't sent again: its driver fails it, and sends back only the
+items it still holds. A rejoining worker sends holding.
 
 An actor lives on one worker, which runs nothing else while it hosts it. The
 worker answers actor-create with an empty result, or the constructor's
@@ -97,7 +98,9 @@ A task-after frame queues a task whose argument is built from other results:
 the single result as is, or with gather set, a `Seq` of all of them; with
 `WITH_VALUE` set, after an encoded value (a `TaskWith`). With `MANY` set it's
 a `TaskMany`, whose results, the object ID and the ones after it, number the
-u64 that follows the flags byte; the task-inputs frame carries it on.
+u64 that follows the flags byte; the task-inputs frame carries it on. With
+`STREAM` set it's a `TaskStream`, whose window is the u64 after the flags
+byte, and it runs as a task-stream does.
 
 A task-many frame runs a `TaskMany`: its worker answers each of its results
 with its own result, stored or error frame, as if each were a task. When
@@ -195,6 +198,9 @@ comptime WITH_VALUE: UInt8 = 2
 comptime MANY: UInt8 = 4
 """Task-after and task-inputs flag: the task is a `TaskMany`, and the number
 of its results, a u64, follows the flags byte."""
+comptime STREAM: UInt8 = 8
+"""Task-after and task-inputs flag: the task is a `TaskStream`, and its
+window, a u64, follows the flags byte."""
 comptime ADDR_SIZE = 12
 comptime ROLE_DRIVER: UInt8 = 1
 comptime ROLE_WORKER: UInt8 = 2

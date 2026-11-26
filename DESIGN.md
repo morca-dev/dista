@@ -573,6 +573,25 @@ kind it doesn't know: a generic `dista head` must be as new as the program.
 Running a failed stream again is its caller's: a flow re-runs the read, and
 morca the step.
 
+PR 3 found the retry rule already in place from PR 1, and a rejoining worker
+already stopping its streams from PR 2; both are tested now
+(`tests/stream_loss.sh`, `tests/drain.sh`, `tests/head_restart.sh`, and a
+stream in `tests/chaos.sh`'s workload). What differs from the plan:
+
+- **The driver's replay** gives back only the items it still holds,
+  collected from its own tables, and fails an unended stream there. It keeps
+  every stream's ID it submitted for its whole life, to know which ranges to
+  skip.
+- **A stream on other results** takes one ref, `rt.stream[T](ref)`. A list
+  of refs, as `remote` takes for a `Seq`, isn't there yet: the wire carries
+  it, the API doesn't.
+- **A resume after a failed send** lost the answers still readable on the
+  old connection, since the driver closed it unread. The head-restart test
+  hit this once its stream sent credit first; the driver now reads what's
+  left before it reconnects.
+- **A stream parked for its inputs** on a worker now starts halted if the
+  head stops it meanwhile, as one waiting to start already did.
+
 ### Not in this plan
 
 - **A stream as a task's input.** Its items are refs, and go to tasks one
@@ -587,7 +606,7 @@ morca the step.
 |---|---|---|---|
 | 1 | **`TaskStream`, `Emit`, `rt.stream`, `rt.next`**, with one slot and with several, no window yet: task-stream, the item IDs, the end object, the head counting a running stream's items. | `tests/test_stream.mojo`: 1,000 small items and 20 stored ones arrive in order and exact, on 1 and on 4 slots; the first item is read while the task still runs; an error after 5 items gives 5 items and then the error; an empty stream ends at once; items feed other tasks; `rt.wait` picks the stream with an item among three. | ~900 |
 | 2 | **The window and cancelling**: credit, `put` blocking both ways, `rt.cancel(s)` and a departed driver raising in `put`. | A stream of 10,000 items of 1 MB read at 50 a second keeps its worker under a fixed size; an unread stream stops at `window` items; a one-slot worker serves a fetch while its stream is blocked; a cancelled stream's task ends within a second. | ~600 |
-| 3 | **Failures**: the retry rule, drain, head restart, the `STREAM` flag on task-after, the fuzzers' and `chaos.sh`'s share. | A worker killed before the first item: the stream completes elsewhere. Killed after: the end fails as above. `tests/drain.sh` with a stream running. | ~500 |
+| 3 | **Failures**: the retry rule, drain, head restart, the `STREAM` flag on task-after, the fuzzers' and `chaos.sh`'s share. Done. | A worker killed before the first item: the stream completes elsewhere. Killed after: the end fails as above. `tests/drain.sh` with a stream running. | ~500 |
 
 ### Defaults to confirm
 
