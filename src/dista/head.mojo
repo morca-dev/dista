@@ -88,8 +88,8 @@ calls there, so none runs twice. Without `DISTA_CHECKPOINT_URI` the
 checkpoint fails, and the actor restarts when its worker leaves, replaying
 its calls, as for one lost.
 
-An actor is placed on a worker that hosts no other, the one with the fewest
-tasks in flight, as soon as it's created; the worker builds it once those
+An actor is placed on a worker that hosts no other and runs no stream, the
+one with the fewest tasks in flight, as soon as it's created; the worker builds it once those
 tasks finish. From then on the head sends that worker only the actor's calls,
 each as it arrives, so they run in order. An actor created when every worker
 hosts one waits for a worker to join or an actor to be killed. Killing an
@@ -2012,6 +2012,10 @@ struct Head(Movable):
                     continue
                 if self._hashes[i] != h or self._draining[i] != _DRAIN_NO:
                     continue
+                if self._streams_on(i) > 0:
+                    # The actor would wait for the stream to end, which may
+                    # wait for its driver to read it: wait for a worker.
+                    continue
                 if best < 0 or len(self._inflight[i]) < len(
                     self._inflight[best]
                 ):
@@ -3267,8 +3271,21 @@ struct Head(Movable):
     def _capacity(self, i: Int) -> Int:
         """Tasks worker `i` is sent at once: the slots it has room for, and
         `pipeline - 1` more waiting there, so a slot that frees has the next
-        one at hand."""
+        one at hand. A slot held by a stream isn't one: a stream runs until
+        its driver reads it, so with every slot held by one, a task sent
+        there would wait on that driver, who may be waiting on the task."""
+        var streams = self._streams_on(i)
+        if streams > 0 and streams >= self._admit[i]:
+            return streams
         return self._admit[i] + self._pipeline - 1
+
+    def _streams_on(self, i: Int) -> Int:
+        """How many streams worker `i` is running."""
+        var n = 0
+        for entry in self._stream_at.items():
+            if entry.value == i:
+                n += 1
+        return n
 
     def _order(self, depth: Int) -> List[Int]:
         """The workers with `depth` tasks in flight, in the order a round

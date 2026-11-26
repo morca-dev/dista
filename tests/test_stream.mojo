@@ -414,6 +414,21 @@ def test_a_one_slot_worker_serves_a_fetch_while_its_stream_waits() raises:
     assert_equal(k, 3)
 
 
+def test_tasks_go_around_a_blocked_stream() raises:
+    """A one-slot worker whose stream waits for its reader is sent no task
+    to wait behind it: the tasks run on the other worker, while the driver
+    reads nothing of the stream."""
+    var rt = Runtime[CountUp, Double](workers=2, pipeline=4)
+    var s = rt.stream[CountUp](100, window=2)
+    assert_true(Bool(rt.next(s, timeout=10.0)))  # it runs, and then waits
+    var refs = List[ObjectRef[Int]]()
+    for k in range(8):
+        refs.append(rt.remote[Double](k))
+    for k in range(8):
+        assert_equal(rt.get(refs[k], timeout=10.0), 2 * k)
+    rt.cancel(s)
+
+
 def test_a_zero_window_never_blocks() raises:
     var rt = Runtime[CountUp](workers=1)
     var s = rt.stream[CountUp](1000, window=0)

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A driver resuming after a failed send first reads what the old head had sent, so no answer in it is lost.
 - A driver tells the head it released a result only once the tasks it submitted on it have settled, so a head restart can't strand them on a freed input.
+- The head sends no task to wait behind streams holding all of a worker's slots, and places no actor on a worker running a stream: either would wait for the stream's reader.
 
 ## [0.6.2] - 2026-11-26
 

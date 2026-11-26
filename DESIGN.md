@@ -595,6 +595,13 @@ stream in `tests/chaos.sh`'s workload). What differs from the plan:
   input no worker had, and the tasks waited for ever. Reading what's left
   made that likely: `chaos.sh` seed 2 hung on Linux. The driver now sends
   the release once those tasks have settled on its side.
+- **A stream holds its slot until it's read**, unlike a task, which ends by
+  itself. The head pipelined tasks onto a worker whose one slot a blocked
+  stream held, and placed an actor on such a worker when it was the only one
+  yet: both waited for a driver that might be waiting on them (the
+  head-restart test's actor never checkpointed when its workers started
+  late). A worker whose slots all hold streams is now sent no more tasks,
+  and an actor waits for a worker that runs no stream.
 - **A stream parked for its inputs** on a worker now starts halted if the
   head stops it meanwhile, as one waiting to start already did.
 
