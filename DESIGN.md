@@ -507,6 +507,11 @@ while True:
   it. With a timeout it raises "timed out", as `get` does.
 - **Waiting on several streams** is `rt.wait` on ids: `s.next_id()` is the
   item `next` would return, and `s.id` is the end.
+- **`next` releases the end when it reads it**, so a stream read to its end
+  leaves nothing behind but the items still held. `rt.cancel(s)` and
+  `rt.release(s)` act on `s.id`: releasing a stream not yet ended cancels it.
+- **An item exists once it's answered.** A task can't be submitted on an
+  item `next` hasn't returned.
 
 ### The window
 
@@ -543,7 +548,11 @@ there per `put`.
 | 36 task-stream | driver to head, head to worker | the window, u64, then the encoded argument |
 | 37 credit | driver to head, head to the stream's worker | how many items the driver has taken, u64 |
 
+| 38 stream-stop | head to the stream's worker | none: the task's next `put` raises `cancelled` |
+
 Items and the end travel as the result, stored and error frames there are.
+An item's frame carries its stream's ID in the task-ID field, which is how
+the head knows whose it is.
 A stream on other tasks' results is a task-after with a `STREAM` flag (8),
 the window following the flags byte as a `TaskMany`'s count does. A head
 from before streams drops a peer that sends kind 36, as it does for any
@@ -558,7 +567,7 @@ kind it doesn't know: a generic `dista head` must be as new as the program.
 | Its worker goes away after an item was answered | The end fails with `worker lost while running this stream, after some of its items were answered`, the rule a `TaskMany` has. Stored items it held are lost with it, as any result is. |
 | `rt.cancel(s)`, or its driver leaves | The task's next `put` raises `cancelled`, so a stream stops where a task can't be stopped. Items already answered stay until released. |
 | Its worker drains | The drain waits for the task, as for any running task; its items move with the worker's other results. |
-| The head restarts | A stream that had not ended fails with `stream interrupted: the head restarted`. Its driver doesn't resubmit it, since items it already took would come again. |
+| The head restarts | A stream that had not ended fails with `stream interrupted: the head restarted`. Its driver doesn't resubmit it, since items it already took would come again. The driver's replay skips a stream's item IDs rather than walking 2^20 of them. |
 
 Running a failed stream again is its caller's: a flow re-runs the read, and
 morca the step.
