@@ -1150,6 +1150,58 @@ struct Client(Movable):
                 self._read_one()
         return self.get(r)
 
+    def wait(
+        mut self, ids: List[UInt64], count: Int = 1, timeout: Float64 = -1.0
+    ) raises -> List[Int]:
+        """Waits until `count` of these objects' tasks have finished, and
+        returns the positions in `ids` of every one that has, in order.
+
+        A task that failed has finished: `get` raises its error. It may
+        return more than `count` positions, when more had finished, and fewer
+        once `timeout` seconds pass: a negative `timeout` waits without end,
+        and 0 only looks. `count` past `len(ids)` means all of them. Nothing
+        is fetched, released or changed, so the same list can be waited on
+        again. This is the form for refs of several result types: an
+        `ObjectRef`'s `id` is its object.
+        """
+        for id in ids:
+            if id in self._released:
+                raise Error("object ", id, " was released")
+        var want = min(count, len(ids))
+        var deadline = Int(perf_counter_ns()) + Int(max(timeout, 0.0) * 1e9)
+        while True:
+            var done = List[Int]()
+            for i in range(len(ids)):
+                if self._settled(ids[i]):
+                    done.append(i)
+            if len(done) >= want:
+                return done^
+            var ms = -1
+            if timeout >= 0.0:
+                var left = deadline - Int(perf_counter_ns())
+                if left <= 0:
+                    return done^
+                ms = left // 1_000_000 + 1
+            if poll_readable([self._head.fd], ms)[0]:
+                self._read_one()
+                # Take what else has already arrived before looking again.
+                while poll_readable([self._head.fd], 0)[0]:
+                    self._read_one()
+
+    def wait[
+        R: AnyType
+    ](
+        mut self,
+        refs: List[ObjectRef[R]],
+        count: Int = 1,
+        timeout: Float64 = -1.0,
+    ) raises -> List[Int]:
+        """Waits until `count` of `refs` have finished: see `wait` on ids."""
+        var ids = List[UInt64](capacity=len(refs))
+        for r in refs:
+            ids.append(r.id)
+        return self.wait(ids, count, timeout)
+
     def cancel[R: AnyType](mut self, r: ObjectRef[R]) raises:
         """Gives up on `r`: if its task hasn't run, it never does; if it's
         running, it finishes on its worker and the result is dropped. `get`

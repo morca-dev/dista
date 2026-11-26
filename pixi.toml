@@ -33,6 +33,7 @@ test-fetch = { cmd = "sh scripts/test.sh test_fetch" }
 test-spill = { cmd = "sh scripts/test.sh test_spill" }
 test-timeline = { cmd = "sh scripts/test.sh test_timeline" }
 test-cancel = { cmd = "sh scripts/test.sh test_cancel" }
+test-wait = { cmd = "sh scripts/test.sh test_wait" }
 test-head-drivers = { cmd = "sh scripts/test.sh test_head_drivers" }
 test-scale = { cmd = "sh scripts/test.sh test_scale" }
 test-executors = { cmd = "sh scripts/test.sh test_executors" }

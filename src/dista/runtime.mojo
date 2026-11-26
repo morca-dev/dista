@@ -443,6 +443,24 @@ struct Runtime[*Ts: TaskLike](Movable):
         """Waits up to `timeout` seconds for `r`: see `Client.get`."""
         return self._c.get(r, timeout)
 
+    def wait[
+        R: AnyType
+    ](
+        mut self,
+        refs: List[ObjectRef[R]],
+        count: Int = 1,
+        timeout: Float64 = -1.0,
+    ) raises -> List[Int]:
+        """Waits until `count` of `refs` have finished, and returns the
+        positions of every one that has: see `Client.wait`."""
+        return self._c.wait(refs, count, timeout)
+
+    def wait(
+        mut self, ids: List[UInt64], count: Int = 1, timeout: Float64 = -1.0
+    ) raises -> List[Int]:
+        """`wait` on object ids (`ref.id`), for refs of several types."""
+        return self._c.wait(ids, count, timeout)
+
     def cancel[R: AnyType](mut self, r: ObjectRef[R]) raises:
         """Gives up on `r`: see `Client.cancel`."""
         self._c.cancel(r)
