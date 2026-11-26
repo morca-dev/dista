@@ -18,6 +18,12 @@ serving; it still builds each task's arguments and stores and reports each
 result itself, so the store and the connections stay on its thread. Actor
 frames always run on the loop, one at a time.
 
+A `TaskStream` reports each item as it puts it, as a result of its own: with
+one slot `put` stores and reports it at once, on the loop's thread, and with
+more it leaves it in its slot's mailbox for the loop (`executors.mojo`).
+Each item's frame carries the stream's ID as its task ID, and the stream's
+end, the number of items or the task's error, goes last.
+
 A result here lives until the head says free, once nothing references it.
 Inputs fetched from peers are copies, kept only until the tasks waiting on
 them have their arguments.
@@ -76,6 +82,7 @@ from dista.frame import (
     KIND_TASK,
     KIND_TASK_INPUTS,
     KIND_TASK_MANY,
+    KIND_TASK_STREAM,
     GATHER,
     WITH_VALUE,
     MANY,
@@ -99,6 +106,7 @@ from dista.checkpoint import (
 )
 from dista.client import TaskContext, peer_connect_timeout_ms
 from dista.executors import DispatchFn, Executors, Job, worker_slots
+from dista.stream import StreamSink
 from dista.metrics import (
     Histogram,
     answer_scrape,
@@ -845,6 +853,7 @@ struct Worker[
             or f.kind == KIND_CHECKPOINT
             or f.kind == KIND_ACTOR_RESTORE
             or f.kind == KIND_TASK_MANY
+            or f.kind == KIND_TASK_STREAM
         ):
             var obj = f.object_id
             var task = f.task_id
@@ -1709,10 +1718,19 @@ struct Worker[
             return False
         if not self._pool:
             return True
-        var kind = self._ready[0].kind
-        if kind != KIND_TASK and kind != KIND_TASK_MANY:
+        if not Self._on_slot(self._ready[0].kind):
             return True
         return self._pool.value().free_slot() >= 0 and self._fits()
+
+    @staticmethod
+    def _on_slot(kind: UInt8) -> Bool:
+        """Whether a frame of `kind` runs on a slot: a task, not an actor
+        frame."""
+        return (
+            kind == KIND_TASK
+            or kind == KIND_TASK_MANY
+            or kind == KIND_TASK_STREAM
+        )
 
     def _fits(mut self) -> Bool:
         """Whether memory has room for one more task to start
@@ -1787,7 +1805,7 @@ struct Worker[
         the loop polls again."""
         while len(self._ready) > 0:
             var kind = self._ready[0].kind
-            if kind != KIND_TASK and kind != KIND_TASK_MANY:
+            if not Self._on_slot(kind):
                 var t = self._ready.pop(0)
                 if self._prepare(t):
                     self._run_actor(t^)
@@ -1816,6 +1834,13 @@ struct Worker[
                 many = Int(get_scalar[DType.uint64](args, pos))
                 var rest = List[UInt8](args[8:])
                 args = rest^
+            elif kind == KIND_TASK_STREAM:
+                # The window goes first; nothing enforces it yet.
+                if len(args) < 8:
+                    self._report_error(t.object_id, "a truncated TaskStream")
+                    continue
+                var rest = List[UInt8](args[8:])
+                args = rest^
             if self._inflight:
                 self._learned.started(
                     t.object_id, t.task_id, self._resident.now()
@@ -1839,6 +1864,14 @@ struct Worker[
         """Stores and reports the tasks the slots finished, as `_run_one`
         and `_run_many` do theirs."""
         var done = self._pool.value().take_done()
+        # Streams' items first: those of a job in `done` came before its end.
+        var items = self._pool.value().take_items()
+        for k in range(len(items)):
+            if items[k].epoch != self._epoch:
+                continue  # the head it was for is gone
+            var bytes = List[UInt8]()
+            swap(bytes, items[k].bytes)
+            self._item(items[k].stream, items[k].id, bytes^)
         if self._sizing and len(done) > 0:
             self._sizing.value().finished()
         while len(done) > 0:
@@ -1886,6 +1919,9 @@ struct Worker[
             return
         if t.kind == KIND_TASK_MANY:
             self._run_many(t^)
+            return
+        if t.kind == KIND_TASK_STREAM:
+            self._run_stream(t^)
             return
         if t.kind != KIND_TASK:
             self._run_actor(t^)
@@ -1936,17 +1972,65 @@ struct Worker[
             else:
                 self._finish(obj, t.arrived, started, parts[k].copy())
 
+    def _run_stream(mut self, var t: _Ready):
+        """Runs a `TaskStream` on the loop's thread: each `put` stores and
+        reports its item at once (`_put_here`), and the end goes last."""
+        var started = wall_ns()
+        if len(t.args) < 8:
+            self._span(t.object_id, t.arrived, started)
+            self._report_error(t.object_id, "a truncated TaskStream")
+            return
+        # The window goes first; nothing enforces it yet.
+        var args = List[UInt8](t.args[8:])
+        t.args = List[UInt8]()
+        self._ctx.stream = StreamSink(
+            Int(Pointer(to=self)), 0, t.object_id, Self._put_here
+        )
+        var out = List[UInt8]()
+        var why = String()
+        try:
+            Self.dispatch(t.task_id, args, out, self._ctx)
+        except e:
+            why = String(e)
+        self._ctx.stream = StreamSink()
+        if why:
+            self._span(t.object_id, t.arrived, started)
+            self._report_error(t.object_id, why)
+            return
+        self._finish(t.object_id, t.arrived, started, out^)
+
+    @staticmethod
+    def _put_here(
+        target: Int,
+        slot: Int,
+        stream: UInt64,
+        id: UInt64,
+        var bytes: List[UInt8],
+    ) raises:
+        """A one-slot worker's `put`: the task runs on the loop's thread,
+        so it stores and reports the item itself. `target` is the worker."""
+        var w = Pointer[Self, MutUntrackedOrigin](unsafe_from_address=target)
+        w[]._item(stream, id, bytes^)
+
+    def _item(mut self, stream: UInt64, id: UInt64, var bytes: List[UInt8]):
+        """Stores and reports item `id` of stream `stream`, as a result of
+        its own; its frame names the stream in its task ID."""
+        self._finish(id, 0, 0, bytes^, stream=stream)
+
     def _finish(
         mut self,
         obj: UInt64,
         arrived: UInt64,
         started: UInt64,
         var out: List[UInt8],
+        stream: UInt64 = 0,
     ):
-        """Sends a small result to the head, or stores a large one here."""
+        """Sends a small result to the head, or stores a large one here. A
+        stream's item (`stream` its ID) has no span of its own."""
         if len(out) <= INLINE_LIMIT:
-            self._span(obj, arrived, started)
-            self._to_head(KIND_RESULT, obj, out)
+            if stream == 0:
+                self._span(obj, arrived, started)
+            self._to_head(KIND_RESULT, obj, out, stream)
         else:
             var path = self._write(obj, out)
             var loc = Location(self._ip, self._port, self._node, path, len(out))
@@ -1954,8 +2038,9 @@ struct Worker[
                 self._files[obj] = loc.copy()
             else:
                 self._objects[obj] = out^
-            self._span(obj, arrived, started)  # storing included
-            self._to_head(KIND_STORED, obj, loc.encode())
+            if stream == 0:
+                self._span(obj, arrived, started)  # storing included
+            self._to_head(KIND_STORED, obj, loc.encode(), stream)
 
     def _write(mut self, obj: UInt64, data: Span[UInt8, _]) -> String:
         """Writes a large result into the node store, or past
@@ -2001,9 +2086,15 @@ struct Worker[
         put_scalar[DType.uint64](body, ended)
         self._to_head(KIND_SPAN, obj, body)
 
-    def _to_head(mut self, kind: UInt8, obj: UInt64, payload: Span[UInt8, _]):
+    def _to_head(
+        mut self,
+        kind: UInt8,
+        obj: UInt64,
+        payload: Span[UInt8, _],
+        task_id: UInt64 = 0,
+    ):
         """Sends to the head; a head that's gone is noticed by `run`."""
         try:
-            self._head.send(kind, obj, 0, payload)
+            self._head.send(kind, obj, task_id, payload)
         except:
             self._head.closed = True

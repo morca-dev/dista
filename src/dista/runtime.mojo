@@ -31,6 +31,9 @@ another task's result: pass an `ObjectRef[A]` instead of an `A`, or a
 `List[ObjectRef[X]]` to a task that takes a `Seq[X]`. The head runs it once
 every input exists, and fails it if an input failed.
 
+`stream` runs a `TaskStream`, whose items `next` reads one at a time as the
+task puts them, each an object of its own.
+
 `create` starts an actor on a worker of its own and returns its handle;
 `call` runs one of its methods there, in the order of the calls, and returns
 an `ObjectRef` like a task does; `checkpoint` saves its state to
@@ -55,6 +58,7 @@ from dista.client import (
 from dista.head import Head
 from dista.signals import exit_on_sigterm
 from dista.socket import Listener, Stream, exit_now, fork, wait_child, wall_ns
+from dista.stream import StreamLike, StreamRef
 from dista.task import (
     ActorLike,
     ManyLike,
@@ -198,7 +202,10 @@ struct Runtime[*Ts: TaskLike](Movable):
     ) raises:
         comptime for i in range(Self.Ts.length):
             if Self.Ts[i].id() == task_id:
-                comptime if conforms_to(Self.Ts[i], CtxTaskLike):
+                comptime if conforms_to(Self.Ts[i], StreamLike):
+                    comptime assert conforms_to(Self.Ts[i], StreamLike)
+                    Self.Ts[i].run_stream(args, out, ctx.stream)
+                elif conforms_to(Self.Ts[i], CtxTaskLike):
                     comptime assert conforms_to(Self.Ts[i], CtxTaskLike)
                     Self.Ts[i].run_ctx(args, out, ctx)
                 else:
@@ -382,6 +389,29 @@ struct Runtime[*Ts: TaskLike](Movable):
         """
         Self._check_registered[T]()
         return self._c.remote_many[T](args, n)
+
+    def stream[
+        T: StreamLike
+    ](mut self, arg: T.A, window: Int = 16) raises -> StreamRef[T.Item]:
+        """Submits task `T`, a `TaskStream`, on `arg`: its items, each an
+        object of its own, are read in order with `next`.
+
+        `window` is how many items the task may put that `next` hasn't
+        returned (0, any). It travels with the task but isn't enforced yet,
+        so `put` never blocks.
+        """
+        Self._check_registered[T]()
+        return self._c.stream[T](arg, window)
+
+    def next[
+        X: AnyType
+    ](
+        mut self, mut s: StreamRef[X], timeout: Float64 = -1.0
+    ) raises -> Optional[ObjectRef[X]]:
+        """Waits for stream `s`'s next item and returns its ref, or None once
+        the task has ended: see `Client.next`. If the task raised, its items
+        come first, then this raises its error."""
+        return self._c.next(s, timeout)
 
     def create[
         T: ActorLike

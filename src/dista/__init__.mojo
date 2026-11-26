@@ -47,6 +47,7 @@ from dista.client import (
 )
 from dista.runtime import Runtime
 from dista.seq import Seq
+from dista.stream import Emit, StreamLike, StreamRef, TaskStream
 from dista.task import (
     Actor,
     ActorLike,
