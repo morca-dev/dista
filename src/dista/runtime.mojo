@@ -72,6 +72,7 @@ from dista.task import (
     MethodLike,
     Task2Like,
     Task3Like,
+    StatefulLike,
     StatePtr,
     TaskLike,
     check_group,
@@ -290,6 +291,9 @@ struct Runtime[*Ts: TaskLike](Movable):
                 elif conforms_to(Self.Ts[i], CtxTaskLike):
                     comptime assert conforms_to(Self.Ts[i], CtxTaskLike)
                     Self.Ts[i].run_ctx(args, out, ctx)
+                elif conforms_to(Self.Ts[i], StatefulLike):
+                    comptime assert conforms_to(Self.Ts[i], StatefulLike)
+                    Self.Ts[i].run_with(ctx.states(), args, out)
                 else:
                     Self.Ts[i].run(args, out)
                 return

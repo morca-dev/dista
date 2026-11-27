@@ -85,6 +85,7 @@ from dista.task import (
     Task2Like,
     Task3Like,
     StatePtr,
+    StatesPtr,
     TaskLike,
     fnv1a64,
 )
@@ -1631,7 +1632,8 @@ def _one_argument[T: TaskLike]() raises:
 struct TaskContext(Movable):
     """What a worker hands a `CtxTask`: a client of its own to the head,
     opened the first time a task asks for it. A `TaskStream` gets its sink
-    from here, which the worker sets while the stream runs."""
+    from here, which the worker sets while the stream runs. A
+    `StatefulTask` gets its worker's states from here too."""
 
     var _connect_to: String
     var _resume_at: String
@@ -1641,6 +1643,8 @@ struct TaskContext(Movable):
     var _client: Optional[Client]
     var stream: StreamSink
     """Where the running stream's items go; the default raises."""
+    var _states: Optional[StatesPtr]
+    """The worker's stateful tasks' states; None outside a worker."""
 
     def __init__(
         out self,
@@ -1648,15 +1652,24 @@ struct TaskContext(Movable):
         resume_at: String,
         registry_hash: UInt64,
         var groups: List[UInt8] = List[UInt8](),
+        states: Optional[StatesPtr] = None,
     ):
         """`connect_to` is the head's `host:port`; `resume_at` the same in a
-        cluster, or "" in local mode, where the head doesn't come back."""
+        cluster, or "" in local mode, where the head doesn't come back.
+        `states` is the worker's, for its stateful tasks."""
         self._connect_to = connect_to
         self._resume_at = resume_at
         self._hash = registry_hash
         self._groups = groups^
         self._client = None
         self.stream = StreamSink()
+        self._states = states
+
+    def states(self) raises -> StatesPtr:
+        """The worker's stateful tasks' states."""
+        if not self._states:
+            raise Error("a StatefulTask runs only on a worker")
+        return self._states.value()
 
     def client(mut self) raises -> ref[self._client.value()] Client:
         if not self._client:

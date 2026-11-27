@@ -36,6 +36,7 @@ test-cancel = { cmd = "sh scripts/test.sh test_cancel" }
 test-wait = { cmd = "sh scripts/test.sh test_wait" }
 test-stream = { cmd = "sh scripts/test.sh test_stream" }
 test-flow = { cmd = "sh scripts/test.sh test_flow" }
+test-stateful = { cmd = "sh scripts/test.sh test_stateful" }
 test-groups = { cmd = "sh scripts/test.sh test_groups" }
 test-head-drivers = { cmd = "sh scripts/test.sh test_head_drivers" }
 test-scale = { cmd = "sh scripts/test.sh test_scale" }
