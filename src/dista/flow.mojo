@@ -552,17 +552,20 @@ struct FlowRun[*Ops: OpLike](Movable):
             return
         var slots = gs.value().slots
         if gs.value().fixed and slots == 1:
-            var which = String("no group's workers")
+            var which = String("the workers with no group")
             if group != "":
-                which = String("group ", group, "'s workers")
+                which = String("the workers of group ", group)
             raise Error(
                 Self._describe(0),
                 " can't run: ",
                 which,
-                " have 1 slot, which the read's stream would hold, and the",
-                " operators after the read run in the same group and need a",
-                " free slot; give the group another worker, or a worker more",
-                " slots (DISTA_WORKER_SLOTS)",
+                (
+                    " have 1 slot between them, which the read's stream would"
+                    " hold,"
+                ),
+                " and the operators after the read run on the same workers and",
+                " need a free slot; add a worker, or give one more slots",
+                " (DISTA_WORKER_SLOTS)",
             )
         self._cap = max(1, min(Self.Ops[0].BUDGET, slots - 1))
 

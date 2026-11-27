@@ -536,8 +536,8 @@ def test_a_read_whose_stream_would_hold_the_only_slot_raises() raises:
     print("  ", msg)
     assert_true(
         msg.startswith(
-            "operator 0 (Read test_flow::items_of) can't run: no group's"
-            " workers have 1 slot"
+            "operator 0 (Read test_flow::items_of) can't run: the workers"
+            " with no group have 1 slot"
         ),
         msg,
     )
