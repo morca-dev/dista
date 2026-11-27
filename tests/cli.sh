@@ -1,8 +1,9 @@
 #!/bin/bash
 # The `dista` command's gate: one generic head (`dista head`) serves two
 # different programs at once, each with workers of its own: the smoke test
-# and the head-restart driver, actor included. Both must pass, `dista status`
-# must show the four workers under two registries, `dista timeline` must
+# and the head-restart driver, actors and stream included (its gpu task and
+# actor on two workers in group gpu). Both must pass, `dista status`
+# must show the workers under two registries, `dista timeline` must
 # write their tasks, and `dista stop` must end the head and every worker.
 set -euo pipefail
 mkdir -p build
@@ -28,8 +29,16 @@ done
 export DISTA_HEAD=localhost:$port
 
 workers=()
-for prog in cli-smoke cli-smoke cli-restart cli-restart; do
+# The restart driver's actor, its stream (held open by its window) and its
+# tasks each need a worker of their own.
+for prog in cli-smoke cli-smoke cli-restart cli-restart cli-restart; do
   DISTA_ROLE=worker ./build/$prog >> build/cli-workers.log 2>&1 &
+  workers+=($!); pids+=($!)
+done
+# The restart driver's gpu actor takes one worker of group gpu and its gpu
+# tasks the other, as in tests/head_restart.sh.
+for _ in 1 2; do
+  DISTA_GROUP=gpu DISTA_ROLE=worker ./build/cli-restart >> build/cli-workers.log 2>&1 &
   workers+=($!); pids+=($!)
 done
 
@@ -43,7 +52,7 @@ status=0
 wait "$smoke" || status=1
 wait "$restart" || status=1
 grep -q '^PASS smoke' build/cli-smoke.log || status=1
-want="lengths $((400 * 100000 + 399 * 400 / 2)) squares $((399 * 400 * 799 / 6)) counter 300"
+want="lengths $((400 * 100000 + 399 * 400 / 2)) squares $((399 * 400 * 799 / 6)) counter 300 gpu squares $((99 * 100 * 199 / 6)) gpu counter 200"
 [ "$(grep '^lengths' build/cli-restart.log || true)" = "$want" ] || status=1
 if [ $status != 0 ]; then
   echo "FAIL: a driver"; tail -5 build/cli-smoke.log build/cli-restart.log build/cli-head.log; exit 1

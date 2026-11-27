@@ -15,7 +15,8 @@ A stream starts first, and the driver reads two of its items before it sends
 the rest. Its window then holds it, unfinished, through the restart: after
 it, `next` returns the items that had come and then fails with "stream
 interrupted: the head restarted", since the driver doesn't send a stream
-again. The items it returned must be right.
+again. The items it returned must be right. Without `RESTART_GATE` (in
+tests/cli.sh) the driver cancels the stream instead.
 
 A task and an actor of group gpu run beside them, on the two workers the
 script starts with `DISTA_GROUP=gpu`: both raise if they run anywhere else.
@@ -156,6 +157,9 @@ def main() raises:
     for i in range(400):
         squares.append(rt.remote[Square](i))
     wait_for_gate()
+    if not getenv("RESTART_GATE"):
+        # No restart is coming (tests/cli.sh): the stream would run for ever.
+        rt.cancel(s)
     var why = String("it ended")
     try:
         while True:
