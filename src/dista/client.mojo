@@ -65,6 +65,7 @@ from dista.frame import (
     append_frame,
 )
 from dista.head import DRIVER_SHIFT
+from dista.loss import STREAM_INTERRUPTED
 from dista.socket import (
     POLLERR,
     POLLHUP,
@@ -1206,7 +1207,7 @@ struct Client(Movable):
         the items its driver took would come twice. Only the items held
         here are looked at, not the `ITEMS_PER_STREAM` IDs."""
         if id in self._live and not self._settled(id):
-            self._errors[id] = String("stream interrupted: the head restarted")
+            self._errors[id] = String(STREAM_INTERRUPTED)
             self._settle(id)
         var items = List[UInt64]()
         var last = id + UInt64(ITEMS_PER_STREAM)

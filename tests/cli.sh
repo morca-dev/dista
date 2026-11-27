@@ -29,9 +29,9 @@ done
 export DISTA_HEAD=localhost:$port
 
 workers=()
-# The restart driver's actor, its stream (held open by its window) and its
-# tasks each need a worker of their own.
-for prog in cli-smoke cli-smoke cli-restart cli-restart cli-restart; do
+# The restart driver's actor, its stream and its flow's stream (each held
+# open by its window) and its tasks each need a worker of their own.
+for prog in cli-smoke cli-smoke cli-restart cli-restart cli-restart cli-restart; do
   DISTA_ROLE=worker ./build/$prog >> build/cli-workers.log 2>&1 &
   workers+=($!); pids+=($!)
 done

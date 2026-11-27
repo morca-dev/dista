@@ -8,7 +8,9 @@
 # "stream interrupted: the head restarted", after the items it had answered.
 # Two more workers are in group gpu, with a gpu task and a gpu actor: the
 # workers rejoin in their group, the driver sends its groups frame again,
-# and both stay on them, the actor restored from its checkpoint too.
+# and both stay on them, the actor restored from its checkpoint too. A flow
+# is running too, its streams open: they are interrupted, the flow reads
+# their inputs again, and its results must be exact.
 set -euo pipefail
 mkdir -p build
 export DISTA_CHECKPOINT_URI=$PWD/build/restart-checkpoints
@@ -83,7 +85,10 @@ fi
 grep -q "^stream: [0-9]* items, then stream interrupted: the head restarted$" build/restart-driver.log \
   || { echo "FAIL: the unfinished stream: $(grep '^stream' build/restart-driver.log)"; exit 1; }
 grep "^stream" build/restart-driver.log
+grep -q "^flow: 240 results exact, [1-9][0-9]* inputs read again$" build/restart-driver.log \
+  || { echo "FAIL: the flow: $(grep '^flow' build/restart-driver.log)"; exit 1; }
+grep "^flow" build/restart-driver.log
 grep -q "resuming" build/restart-driver.log || { echo "FAIL: the driver never lost its head"; exit 1; }
 grep "restoring actor" build/restart-head.log || { echo "FAIL: the actor wasn't restored from a checkpoint"; exit 1; }
 [ "$(grep -c "restoring actor" build/restart-head.log)" -ge 2 ] || { echo "FAIL: both actors weren't restored from a checkpoint"; exit 1; }
-echo "PASS head restart: killed mid-run, workers rejoined in their groups, the driver resumed, answers and both actors' counts exact, the stream interrupted"
+echo "PASS head restart: killed mid-run, workers rejoined in their groups, the driver resumed, answers and both actors' counts exact, the stream interrupted, the flow exact"
