@@ -203,6 +203,7 @@ from dista.metrics import (
     Histogram,
     answer_scrape,
     metrics_listener,
+    write_by_group,
     write_metric,
     write_outcomes,
 )
@@ -315,6 +316,22 @@ struct _Task(Copyable, Movable):
         """Whether it runs a `TaskStream`: a task-stream, or task-inputs
         for one submitted on other results."""
         return self.kind == KIND_TASK_STREAM or self.window >= 0
+
+
+@fieldwise_init
+struct _GroupRow(Copyable, Movable):
+    """One worker group's demand, for `dista status` and `/metrics`."""
+
+    var name: String
+    var workers: Int
+    var slots: Int
+    var ready: Int
+    var waiting: Int
+    """Tasks waiting for their inputs."""
+    var running: Int
+    """Tasks and calls in flight on the group's workers."""
+    var actors: Int
+    """Actors of the group waiting for a worker."""
 
 
 struct _Actor(Copyable, Movable):
@@ -1109,6 +1126,40 @@ struct Head(Movable):
             "Actors waiting for a worker of their own.",
             len(self._unplaced),
         )
+        # The same per group, under their own names, so a sum over the
+        # unlabelled totals above doesn't count anything twice.
+        var names = List[String]()
+        var per = List[List[Int]]()
+        for _ in range(6):
+            per.append(List[Int]())
+        for g in self._group_rows():
+            names.append(g.name)
+            per[0].append(g.workers)
+            per[1].append(g.slots)
+            per[2].append(g.ready)
+            per[3].append(g.waiting)
+            per[4].append(g.running)
+            per[5].append(g.actors)
+        var gauges: List[String] = [
+            "workers",
+            "slots",
+            "tasks_ready",
+            "tasks_waiting",
+            "tasks_running",
+            "actors_waiting",
+        ]
+        var helps: List[String] = [
+            "Workers connected, by group.",
+            "Their slots, by group.",
+            "Tasks ready and waiting for a worker of their group.",
+            "Tasks of the group waiting for their inputs.",
+            "Tasks and actor calls in flight on the group's workers.",
+            "Actors of the group waiting for a worker.",
+        ]
+        for k in range(6):
+            write_by_group(
+                out, String("dista_group_", gauges[k]), helps[k], names, per[k]
+            )
         write_metric(
             out,
             "counter",
@@ -1195,6 +1246,31 @@ struct Head(Movable):
         )
         if self._registry_hash != 0:
             out += String("registry ", hex(self._registry_hash), "\n")
+        # A line per group once any has a name, those with no workers too.
+        var rows = self._group_rows()
+        var named = False
+        for g in rows:
+            named = named or g.name != ""
+        if named:
+            out += "groups:\n"
+            for g in rows:
+                out += String(
+                    "  ",
+                    g.name if g.name != "" else "(none)",
+                    "  workers ",
+                    g.workers,
+                    "  slots ",
+                    g.slots,
+                    "  ready ",
+                    g.ready,
+                    "  waiting ",
+                    g.waiting,
+                    "  running ",
+                    g.running,
+                )
+                if g.actors > 0:
+                    out += String("  actors waiting ", g.actors)
+                out += "\n"
         out += "workers:\n"
         for i in range(len(self._roles)):
             if self._roles[i] != ROLE_WORKER:
@@ -1374,6 +1450,44 @@ struct Head(Movable):
                 pass
         return i
 
+    def _group_rows(self) -> List[_GroupRow]:
+        """Each group's demand, by name ("" first): every group with a
+        worker, a task or an actor waiting, the one with no name included.
+        A task's running count is its worker's group's."""
+        var rows = List[_GroupRow]()
+
+        def at(mut rows: List[_GroupRow], name: String) -> Int:
+            for k in range(len(rows)):
+                if rows[k].name == name:
+                    return k
+            rows.append(_GroupRow(name.copy(), 0, 0, 0, 0, 0, 0))
+            return len(rows) - 1
+
+        for i in range(len(self._roles)):
+            if self._roles[i] == ROLE_WORKER:
+                var k = at(rows, self._group[i])
+                rows[k].workers += 1
+                rows[k].slots += self._slots[i]
+                rows[k].running += len(self._inflight[i])
+        for entry in self._queues.items():
+            if len(entry.value) > 0:
+                var g = self._key_group.get(entry.key, String())
+                rows[at(rows, g)].ready += len(entry.value)
+        for entry in self._waiting.items():
+            rows[at(rows, self._group_of(entry.value))].waiting += 1
+        for a in self._unplaced:
+            if a in self._actors:
+                try:
+                    rows[at(rows, self._actors[a].group)].actors += 1
+                except:
+                    pass
+        for i in range(1, len(rows)):
+            var j = i
+            while j > 0 and rows[j - 1].name > rows[j].name:
+                rows.swap_elements(j - 1, j)
+                j -= 1
+        return rows^
+
     def _idle_workers(self) -> Int:
         var now = wall_ns()
         var n = 0
@@ -1456,6 +1570,29 @@ struct Head(Movable):
                 "}",
             )
             first = False
+        # Per group, the same counts: an autoscaler sizes each group alone.
+        out += '],"groups":['
+        sep = ""
+        for g in self._group_rows():
+            out += String(
+                sep,
+                '{"group":"',
+                g.name,
+                '","workers":',
+                g.workers,
+                ',"slots":',
+                g.slots,
+                ',"tasks_ready":',
+                g.ready,
+                ',"tasks_waiting":',
+                g.waiting,
+                ',"tasks_running":',
+                g.running,
+                ',"actors_waiting":',
+                g.actors,
+                "}",
+            )
+            sep = ","
         out += "]}\n"
         return out^
 

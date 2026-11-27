@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A stream's window and cancelling:** `put` waits while `window` items are unread, and `rt.cancel(s)`, `rt.release(s)` or a departed driver makes it raise `cancelled`.
 - **Worker groups:** `group=` on a task's type runs it only on workers with that `DISTA_GROUP`; local mode forks them with `Runtime(groups="gpu=1")`.
 - **Actors in worker groups:** an `Actor` with `group=` is placed, restored and moved only on workers of its group, and `dista drain` refuses the last worker of a group with tasks of it queued.
+- **Demand per worker group:** `dista status --json` has a `groups` list, `/metrics` has `dista_group_*` gauges labelled by group, and `dista scale --once --group NAME` decides for one group (`Demand.of`).
 - **Streams under failure:** a stream whose worker is lost before any item runs again elsewhere, and after one its end fails; a head restart fails an unfinished stream; `rt.stream` takes another task's result.
 
 ### Fixed

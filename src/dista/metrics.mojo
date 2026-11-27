@@ -76,6 +76,20 @@ def write_metric(
     out += String(name, " ", value, "\n")
 
 
+def write_by_group(
+    mut out: String,
+    name: String,
+    help: String,
+    groups: List[String],
+    values: List[Int],
+):
+    """A gauge with a `group` label, one series per group ("" for none)."""
+    out += String("# HELP ", name, " ", help, "\n")
+    out += String("# TYPE ", name, " gauge\n")
+    for k in range(min(len(groups), len(values))):
+        out += String(name, '{group="', groups[k], '"} ', values[k], "\n")
+
+
 def write_outcomes(
     mut out: String, name: String, help: String, ok: Int, err: Int
 ):

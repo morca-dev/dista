@@ -10,6 +10,10 @@ names with `dista drain`:
                      short_since)
     # start got.start workers; drain each of got.drain; keep got.short_since
 
+With worker groups, each group scales alone: `d.of("gpu")` is that group's
+demand, its workers and its tasks only, and `decide` takes it with that
+group's policy.
+
 `decide` has no clock and no I/O: `now` is the provider's, in seconds, and
 `short_since`, when the job first ran short of workers, comes back in the
 decision for the next call. So it's tested on tables of demand over time.
@@ -27,7 +31,6 @@ would have nowhere to go.
 """
 
 
-@fieldwise_init
 struct WorkerDemand(Copyable, Movable):
     """One worker, as the head sees it."""
 
@@ -42,6 +45,41 @@ struct WorkerDemand(Copyable, Movable):
     var actor: UInt64
     """The actor it hosts, or 0."""
     var draining: Bool
+    var group: String
+    """Its worker group (`DISTA_GROUP`); "" for none."""
+
+    def __init__(
+        out self,
+        var address: String,
+        running: Int,
+        idle_seconds: Float64,
+        held_bytes: Int,
+        actor: UInt64,
+        draining: Bool,
+        var group: String = String(),
+    ):
+        self.address = address^
+        self.running = running
+        self.idle_seconds = idle_seconds
+        self.held_bytes = held_bytes
+        self.actor = actor
+        self.draining = draining
+        self.group = group^
+
+
+@fieldwise_init
+struct GroupDemand(Copyable, Movable):
+    """One worker group's counts, from the `groups` list of
+    `dista status --json`."""
+
+    var group: String
+    var workers: Int
+    var slots: Int
+    var tasks_ready: Int
+    var tasks_waiting: Int
+    var tasks_running: Int
+    """Tasks in flight on the group's workers."""
+    var actors_waiting: Int
 
 
 struct Demand(Copyable, Movable):
@@ -59,6 +97,11 @@ struct Demand(Copyable, Movable):
     var checkpoints: Bool
     """Whether actors can move, through a checkpoint store."""
     var workers: List[WorkerDemand]
+    var groups: List[GroupDemand]
+    """Per group, from a head that sends them; empty from one before
+    groups."""
+    var has_groups: Bool
+    """Whether the status had a `groups` list."""
 
     def __init__(
         out self,
@@ -69,6 +112,7 @@ struct Demand(Copyable, Movable):
         pipeline: Int = 2,
         checkpoints: Bool = False,
         var workers: List[WorkerDemand] = List[WorkerDemand](),
+        var groups: List[GroupDemand] = List[GroupDemand](),
     ):
         self.tasks_ready = tasks_ready
         self.tasks_waiting = tasks_waiting
@@ -77,6 +121,8 @@ struct Demand(Copyable, Movable):
         self.pipeline = pipeline
         self.checkpoints = checkpoints
         self.workers = workers^
+        self.has_groups = len(groups) > 0
+        self.groups = groups^
 
     @staticmethod
     def parse(text: String) raises -> Demand:
@@ -110,6 +156,15 @@ struct Demand(Copyable, Movable):
                         if p.take("]"):
                             break
                         p.expect(",")
+            elif key == "groups":
+                d.has_groups = True
+                p.expect("[")
+                if not p.take("]"):
+                    while True:
+                        d.groups.append(_group(p))
+                        if p.take("]"):
+                            break
+                        p.expect(",")
             else:
                 p.skip_value()
             if p.take("}"):
@@ -123,6 +178,59 @@ struct Demand(Copyable, Movable):
             if not w.draining:
                 n += 1
         return n
+
+    def of(self, group: String) -> Demand:
+        """The demand of one group, in the shape `decide` takes: only its
+        workers, and its own tasks and actors. From a head before groups,
+        the group with no name is the whole demand and any other is empty.
+        """
+        var d = Demand(pipeline=self.pipeline, checkpoints=self.checkpoints)
+        for w in self.workers:
+            if w.group == group:
+                d.workers.append(w.copy())
+        if not self.has_groups:
+            if group == "":
+                d.tasks_ready = self.tasks_ready
+                d.tasks_waiting = self.tasks_waiting
+                d.tasks_running = self.tasks_running
+                d.actors_waiting = self.actors_waiting
+            return d^
+        for g in self.groups:
+            if g.group == group:
+                d.tasks_ready = g.tasks_ready
+                d.tasks_waiting = g.tasks_waiting
+                d.tasks_running = g.tasks_running
+                d.actors_waiting = g.actors_waiting
+        return d^
+
+
+def _group(mut p: _Reader) raises -> GroupDemand:
+    var g = GroupDemand("", 0, 0, 0, 0, 0, 0)
+    p.expect("{")
+    if p.take("}"):
+        return g^
+    while True:
+        var key = p.string()
+        p.expect(":")
+        if key == "group":
+            g.group = p.string()
+        elif key == "workers":
+            g.workers = Int(p.number())
+        elif key == "slots":
+            g.slots = Int(p.number())
+        elif key == "tasks_ready":
+            g.tasks_ready = Int(p.number())
+        elif key == "tasks_waiting":
+            g.tasks_waiting = Int(p.number())
+        elif key == "tasks_running":
+            g.tasks_running = Int(p.number())
+        elif key == "actors_waiting":
+            g.actors_waiting = Int(p.number())
+        else:
+            p.skip_value()
+        if p.take("}"):
+            return g^
+        p.expect(",")
 
 
 def _worker(mut p: _Reader) raises -> WorkerDemand:
@@ -145,6 +253,8 @@ def _worker(mut p: _Reader) raises -> WorkerDemand:
             w.actor = UInt64(Int(p.number()))
         elif key == "draining":
             w.draining = p.boolean()
+        elif key == "group":
+            w.group = p.string()
         else:
             p.skip_value()
         if p.take("}"):

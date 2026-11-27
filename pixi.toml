@@ -52,6 +52,7 @@ test-peer-loss = { cmd = "tests/peer_loss.sh" }
 test-stream-loss = { cmd = "tests/stream_loss.sh" }
 test-peer-connect = { cmd = "tests/peer_connect.sh" }
 test-autoscale = { cmd = "tests/autoscale.sh" }
+test-autoscale-groups = { cmd = "tests/autoscale.sh groups" }
 test-cli = { cmd = "tests/cli.sh" }
 test-chaos = { cmd = "CHAOS_FAST=1 tests/chaos.sh" }
 test-kind = { cmd = "tests/kind.sh" }
@@ -59,7 +60,7 @@ test-kind = { cmd = "tests/kind.sh" }
 # (scripts/build-tests.sh, scripts/mojo-build.sh): the unit tests' one
 # binary, test-libc-abi's, test-head-loop's and build/dista.
 build-tests = { cmd = "scripts/build-tests.sh" }
-test = { depends-on = ["build-tests", "test-units", "test-libc-abi", "test-head-loop", "test-cluster", "test-restart", "test-locality", "test-compile-fail", "test-metrics", "test-drain", "test-peer-loss", "test-stream-loss", "test-peer-connect", "test-autoscale", "test-cli", "test-chaos"] }
+test = { depends-on = ["build-tests", "test-units", "test-libc-abi", "test-head-loop", "test-cluster", "test-restart", "test-locality", "test-compile-fail", "test-metrics", "test-drain", "test-peer-loss", "test-stream-loss", "test-peer-connect", "test-autoscale", "test-autoscale-groups", "test-cli", "test-chaos"] }
 cli = { cmd = "scripts/mojo-build.sh -I src $DEP_INC cli/main.mojo -o build/dista" }
 bench = { cmd = "scripts/mojo-build.sh -I src $DEP_INC bench/fanout.mojo -o build/bench-fanout && ./build/bench-fanout" }
 bench-slots = { cmd = "scripts/mojo-build.sh -I src $DEP_INC bench/slots.mojo -o build/bench-slots && ./build/bench-slots" }
