@@ -725,7 +725,7 @@ its grant), so the head only routes by a name.
 | # | PR | Gate | Size |
 |---|---|---|---|
 | 1 | **Groups for tasks**: `DISTA_GROUP` and the hello, `group=` on the task types, the groups frame, dispatch by group, local mode's `groups=`, the group in `dista status`. Done; see "PR 1 against the plan" below. | `tests/test_groups.mojo`: of 200 tasks in two groups, each runs on a worker of its group (it returns its worker's group); tasks with no group never run on a grouped worker; a `TaskMany` and a stream keep to their group; a task of a group with no worker fails at once in local mode; a worker killed mid-run has its tasks run again inside the group. A program without groups sends the bytes it sent before. | ~600 |
-| 2 | **Actors and failures**: placement by group, restore and move on a drain inside the group, the drain refusals, a head restart (workers rejoin with their group, the table is sent again), the fuzzers' share. | An actor with `group="gpu"` is built on the gpu worker with three others idle; with two gpu workers, a drained one's actor moves to the other; `tests/head_restart.sh` with a grouped task and actor. | ~400 |
+| 2 | **Actors and failures**: placement by group, restore and move on a drain inside the group, the drain refusals, a head restart (workers rejoin with their group, the table is sent again), the fuzzers' share. Done; see "PR 2 against the plan" below. | An actor with `group="gpu"` is built on the gpu worker with three others idle; with two gpu workers, a drained one's actor moves to the other; `tests/head_restart.sh` with a grouped task and actor. | ~400 |
 | 3 | **Demand per group**: `status --json`, `/metrics`, `demand.of`, `dista scale --group`. | `tests/autoscale.sh` with two groups: tasks of group `b` queued grow `b` alone, and it drains back alone. | ~400 |
 
 ### PR 1 against the plan
@@ -734,8 +734,16 @@ its grant), so the head only routes by a name.
 - **The groups frame** is a count (u64), then per task its ID (u64), a length byte and the name. The head checks every name, as it does a hello's.
 - **Queues.** A task's queue was its program's; now it's its program's and its group's (`queue_key`: the registry hash for no group, else the hash mixed with the group's), and a worker takes from the queue of its program and group. Locality and `_wanted` (idle seconds) compare that key.
 - **Local mode** also fails a group's queued tasks once every forked worker of that group has gone, as it already failed every queued task once all had: `no worker of group gpu left`. A task with no group and no worker without one (`Runtime(workers=0, groups="gpu=1")`, which is allowed) fails with `no worker without a group`.
-- **Actors are still placed by program alone** until PR 2: an actor of no group may land on a grouped worker, and one of a group on any worker. `Actor` takes `group=`, and the registry check and the groups frame include it, but the head ignores it for actors.
+- **Actors were still placed by program alone**, with `group=` in the registry check and the groups frame but ignored by the head; PR 2 places them by it.
 - **`dista status --json`** gives each worker's `"group"` ("" for none) now; the `groups` list is PR 3's.
+
+### PR 2 against the plan
+
+- **An actor's group** is looked up in its driver's groups frame when it's created, and kept with it. It's placed, restored after its worker is lost, and moved off a draining worker only onto a worker of its program and group, so these three were one change in `_place`.
+- **Local mode** fails an actor of a group no forked worker is in, or whose every one has gone, with the message its tasks get: its create, its calls and its checkpoints. This holds for actors of no group too, which before waited for ever once every local worker had gone.
+- **The drain refusal** counts the group's tasks queued, waiting for inputs and running, as the refusal for the last worker counted all of them. The message names the group (`the last worker of group gpu`), or says `the last worker without a group` when grouped workers remain; a program with no groups gets the message it got before.
+- **The last worker of a group hosting an actor** drains, as the last worker hosting an actor did before: an actor never held a drain back. The actor moves through its checkpoint and, with no worker of its group left, waits, its calls held, until one joins and it's restored there. Without a checkpoint store it restarts from its constructor when one joins, replaying its calls. Refusing would keep an idle pool from shrinking to zero; an autoscaler already drains an actor's worker only with a checkpoint store (`dista.scale`).
+- **Tests.** `tests/test_groups.mojo` checks placement with three workers of no group idle (and that an actor of no group waits rather than take a free gpu worker), the move and the restore on two gpu workers beside three of none (the restore from an explicit checkpoint, so it can't race the kill), local mode's failure, a `CtxTask` submitting a grouped task through its client, and the refusals. `tests/head_restart.sh` adds two gpu workers, 100 gpu tasks and a gpu actor with 200 calls, each raising off a gpu worker; both actors must be restored from checkpoints. `fuzz_head` puts task 3 in a group no worker is in and checks every placed actor is on a worker of its group.
 
 ### Defaults to confirm
 

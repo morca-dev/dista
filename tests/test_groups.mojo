@@ -22,7 +22,11 @@ from std.time import perf_counter_ns, sleep
 
 from dista import (
     Actor,
+    ActorHandle,
+    Client,
+    CtxTask,
     Emit,
+    Method,
     ObjectRef,
     Runtime,
     Seq,
@@ -51,6 +55,7 @@ from dista.task import check_group
 from dista.worker import worker_hello
 
 comptime MARKS = "build/groups-marks"
+comptime CHECKPOINTS = "build/groups-checkpoints"
 
 
 def _pid() -> Int:
@@ -123,6 +128,58 @@ comptime StreamInA = TaskStream[Int, String, stream_in_a, group="a"]
 comptime MarkedInA = Task[Int, String, marked_in_a, group="a"]
 comptime BadGroup = Task[Int, String, upper, group="GPU"]
 comptime GroupedActor = Actor[Int, Int, new_state, group="gpu"]
+
+
+@fieldwise_init
+struct Spot(Movable):
+    """A counter that remembers the process that built it: one restored from
+    a checkpoint names the first, one built again its own."""
+
+    var total: Int
+    var built_by: Int
+
+
+def new_gpu_spot(start: Int) -> Spot:
+    return Spot(start, _pid())
+
+
+def new_plain_spot(start: Int) -> Spot:
+    return Spot(start, _pid())
+
+
+def spot_add(mut s: Spot, n: Int) -> Int:
+    s.total += n
+    return s.total
+
+
+def spot_where(mut s: Spot, n: Int) -> String:
+    """This worker's group and pid."""
+    return String(_here(), ":", _pid())
+
+
+def spot_builder(mut s: Spot, n: Int) -> Int:
+    return s.built_by
+
+
+def plain_where(mut s: Spot, n: Int) -> String:
+    return String(_here(), ":", _pid())
+
+
+def submit_in_a(mut c: Client, x: Int) raises -> String:
+    """Submits a task of group a from inside a task, through its client."""
+    return c.get(c.remote[InA](x))
+
+
+comptime GpuSpot = Actor[Spot, Int, new_gpu_spot, group="gpu"]
+comptime SpotAdd = Method[GpuSpot, Int, Int, spot_add]
+comptime SpotWhere = Method[GpuSpot, Int, String, spot_where]
+comptime SpotBuilder = Method[GpuSpot, Int, Int, spot_builder]
+comptime PlainSpot = Actor[Spot, Int, new_plain_spot]
+comptime PlainWhere = Method[PlainSpot, Int, String, plain_where]
+comptime SubmitInA = CtxTask[Int, String, submit_in_a]
+comptime SpotRT = Runtime[
+    GpuSpot, SpotAdd, SpotWhere, SpotBuilder, PlainSpot, PlainWhere
+]
 
 
 def _slots(n: Int):
@@ -277,6 +334,108 @@ def test_a_killed_workers_tasks_run_again_in_its_group_on_four_slots() raises:
     _killed_in_group(4)
 
 
+def _pid_of(at: String) raises -> Int:
+    return Int(at.split(":")[1])
+
+
+def test_a_grouped_actor_is_built_on_its_group() raises:
+    """With three workers of no group idle, an actor of group gpu is built on
+    the gpu worker; actors of no group never are, even with it free."""
+    var rt = SpotRT(workers=3, groups="gpu=1")
+    var g = rt.create[GpuSpot](0)
+    var at = rt.get(rt.call[SpotWhere](g, 0))
+    assert_true(at.startswith("gpu:"), String("built on ", at))
+    var plain = List[ActorHandle[PlainSpot]]()
+    for _ in range(3):
+        plain.append(rt.create[PlainSpot](0))
+    for ref p in plain:
+        var w = rt.get(rt.call[PlainWhere](p, 0))
+        assert_true(w.startswith("-:"), String("built on ", w))
+    rt.kill(g)
+    # The gpu worker is free, but a fourth actor of no group waits for one of
+    # no group.
+    var extra = rt.create[PlainSpot](0)
+    var r = rt.call[PlainWhere](extra, 0)
+    with assert_raises(contains="timed out"):
+        _ = rt.get(r, 1.0)
+    rt.kill(plain[0])
+    var w = rt.get(r, 30.0)
+    assert_true(w.startswith("-:"), String("built on ", w))
+
+
+def test_an_actor_of_a_group_with_no_worker_fails_at_once() raises:
+    """In local mode, nobody adds a worker: an actor of a group none is in
+    fails its calls at once, and one of no group still runs."""
+    var rt = SpotRT(workers=1)
+    var t0 = perf_counter_ns()
+    var g = rt.create[GpuSpot](0)
+    with assert_raises(contains="no worker of group gpu"):
+        _ = rt.get(rt.call[SpotWhere](g, 0), 10.0)
+    assert_true(
+        perf_counter_ns() - t0 < 5_000_000_000, "the actor didn't fail at once"
+    )
+    var p = rt.create[PlainSpot](0)
+    assert_true(rt.get(rt.call[PlainWhere](p, 0), 30.0).startswith("-:"))
+
+
+def _use_checkpoints() raises:
+    """Points the workers forked after this at a fresh checkpoint directory."""
+    _ = setenv("DISTA_CHECKPOINT_URI", CHECKPOINTS)
+    if exists(CHECKPOINTS):
+        for d in listdir(CHECKPOINTS):
+            var dir = String(CHECKPOINTS, "/", d)
+            for f in listdir(dir):
+                remove(String(dir, "/", f))
+
+
+def _moves_in_group(signal: Int) raises:
+    """Two gpu workers and three of no group; the gpu actor's worker gets
+    `signal` after 500 calls, and 500 more follow. The actor comes back on
+    the other gpu worker, restored from a checkpoint, and every count is
+    exact."""
+    _use_checkpoints()
+    var rt = SpotRT(workers=3, groups="gpu=2")
+    _ = unsetenv("DISTA_CHECKPOINT_URI")
+    var c = rt.create[GpuSpot](0)
+    var refs = List[ObjectRef[Int]](capacity=1000)
+    for _ in range(500):
+        refs.append(rt.call[SpotAdd](c, 1))
+    var first = rt.get(rt.call[SpotWhere](c, 0))
+    assert_true(first.startswith("gpu:"), String("built on ", first))
+    if signal == 9:
+        # A checkpoint to restore from, after every call so far.
+        assert_equal(rt.get(rt.checkpoint(c)), 501)
+    _ = external_call["kill", c_int](c_int(_pid_of(first)), c_int(signal))
+    for _ in range(500):
+        refs.append(rt.call[SpotAdd](c, 1))
+    for i in range(1000):
+        assert_equal(rt.get(refs[i], 60.0), i + 1)
+    var now = rt.get(rt.call[SpotWhere](c, 0))
+    assert_true(now.startswith("gpu:"), String("moved to ", now))
+    assert_true(_pid_of(now) != _pid_of(first), "still on the same worker")
+    assert_equal(
+        rt.get(rt.call[SpotBuilder](c, 0)),
+        _pid_of(first),
+        "built again, not restored from a checkpoint",
+    )
+    rt.kill(c)
+
+
+def test_a_drained_gpu_workers_actor_moves_to_the_other() raises:
+    _moves_in_group(15)
+
+
+def test_a_killed_gpu_workers_actor_is_restored_on_the_other() raises:
+    _moves_in_group(9)
+
+
+def test_a_tasks_client_submits_in_its_group() raises:
+    """A task of no group submits one of group a through its context: the
+    client sends the groups frame, so it runs on the a worker."""
+    var rt = Runtime[SubmitInA, InA](workers=1, groups="a=1")
+    assert_equal(rt.get(rt.remote[SubmitInA](1), 30.0), "a")
+
+
 def test_a_bad_group_name_is_refused() raises:
     with assert_raises(contains="bad worker group name 'GPU'"):
         _ = Runtime[BadGroup](workers=1)
@@ -354,13 +513,13 @@ def _sent(mut head: Head, w: Int, s: Stream) raises -> Optional[Frame]:
 
 
 def _worker(
-    mut head: Head, mut peers: List[Stream], group: String
+    mut head: Head, mut peers: List[Stream], group: String, port: Int = 7000
 ) raises -> Int:
     var w = _connect(head, peers)
     head._handle(
         w,
         Frame(
-            KIND_HELLO, 0, 0, worker_hello(HASH, [127, 0, 0, 1], 7000, 1, group)
+            KIND_HELLO, 0, 0, worker_hello(HASH, [127, 0, 0, 1], port, 1, group)
         ),
     )
     return w
@@ -400,6 +559,48 @@ def test_a_cluster_keeps_a_task_of_a_group_with_no_worker_queued() raises:
     assert_true(Bool(f) and f.value().object_id == base | 1)
     assert_true("group gpu" in head._status())
     assert_true('"group":"gpu"' in head._status_json())
+    _ = len(peers)
+
+
+def test_the_last_worker_of_a_group_with_its_tasks_is_not_drained() raises:
+    """`dista drain` refuses the last worker of a group while tasks of that
+    group are queued or running, beside workers of other groups; a worker
+    with another of its group left, or none of its tasks, drains."""
+    var head = Head(Listener(0), HASH, 1, False)
+    var peers = List[Stream]()
+    var d = _connect(head, peers)
+    var hello: List[UInt8] = [ROLE_DRIVER]
+    put_scalar[DType.uint64](hello, HASH)
+    head._handle(d, Frame(KIND_HELLO, 0, 0, hello^))
+    head._handle(
+        d, Frame(KIND_GROUPS, 0, 0, encode_groups([UInt64(7)], ["gpu"]))
+    )
+    var base = UInt64(0)
+    for entry in head._driver_conn.items():
+        if entry.value == d:
+            base = entry.key << DRIVER_SHIFT
+    var gpu = _worker(head, peers, "gpu", 7001)
+    var plain = _worker(head, peers, "", 7002)
+    var io = _worker(head, peers, "io", 7003)
+    for k in range(3):
+        head._handle(
+            d, Frame(KIND_TASK, base | UInt64(k + 1), 7, List[UInt8]())
+        )
+    head._handle(d, Frame(KIND_TASK, base | 4, 8, List[UInt8]()))
+    head._release_waiting()
+    head._dispatch()
+    var why = head._drain_by_name(head._addr(gpu))
+    assert_true(
+        "it's the last worker of group gpu and 3 tasks" in why, String(why)
+    )
+    why = head._drain_by_name(head._addr(plain))
+    assert_true(
+        "it's the last worker without a group and 1 tasks" in why, String(why)
+    )
+    assert_equal(head._drain_by_name(head._addr(io)), "")
+    # With a second gpu worker, the first drains.
+    _ = _worker(head, peers, "gpu", 7004)
+    assert_equal(head._drain_by_name(head._addr(gpu)), "")
     _ = len(peers)
 
 
