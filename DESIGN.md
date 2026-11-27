@@ -855,8 +855,8 @@ but not yet taken by the next operator.
 ### State on a worker
 
 The model is loaded once per worker and used by every batch. morca's
-document proposed a pool of actors for that. This plan proposes a task with
-state instead, and the choice is the first default to confirm.
+document proposed a pool of actors for that. This plan uses a task with state
+instead, the first of the defaults confirmed below.
 
 ```mojo
 def load_model() raises -> Model: ...
@@ -943,9 +943,9 @@ Why not actors, which exist:
 - **In the core.** `Client.error_of(id)` tells the executor a finished task failed without fetching its result; `Runtime.client()` gives the executor the client, to submit on object IDs, after `start` has checked every operator's task is registered (and that a `Map`'s is a `Task` of one argument). `TaskLike`'s `A` and `R` and `StreamLike`'s `Item` are now `Movable & Deinitable`, as every task type already declared them, so that a run can keep its inputs in a `List`.
 - **The backpressure test** holds the last operator for 3 seconds, with `streams=2, window=4` and budgets of 3 and 2: the streams, which write how many items they've put to a file each, had put 13 items, the bound exactly, when the first held task looked.
 
-### Defaults to confirm
+### Defaults (confirmed 2026-11-27)
 
-| Default | Proposed | Alternative |
+| Default | Chosen | Alternative |
 |---|---|---|
 | Where the model lives | a `StatefulTask`: state per worker, scaled with its group | a pool of actors run by the executor, as morca's document says; it needs calls on refs and actors that don't replay |
 | A lost batch | its input is read again, and results are handed out per finished input | the flow fails and the morca step repeats; results could then come one by one |
