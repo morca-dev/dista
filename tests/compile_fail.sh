@@ -16,5 +16,7 @@ expect_error() {
   echo "ok: $file"
 }
 expect_error tests/compile_fail/nested_ref.mojo "dista can't send an ObjectRef inside a value"
+expect_error tests/compile_fail/flow_out_of_order.mojo "an operator's input must be the output of the one before it"
+expect_error tests/compile_fail/flow_without_read.mojo "a flow's first operator is a Read"
 [ $status = 0 ] && echo "PASS compile-fail: every program was refused with its error"
 exit $status

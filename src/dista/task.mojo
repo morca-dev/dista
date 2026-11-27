@@ -99,9 +99,9 @@ trait TaskLike:
     """What the runtime needs from a task, an actor or a method, without
     knowing its function. Each implements the part that applies to it."""
 
-    comptime A: Movable
+    comptime A: Movable & Deinitable
     """The argument type."""
-    comptime R: Movable
+    comptime R: Movable & Deinitable
     """The result type."""
 
     @staticmethod

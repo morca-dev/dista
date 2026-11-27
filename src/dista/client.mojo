@@ -1233,6 +1233,17 @@ struct Client(Movable):
     def _settled(self, id: UInt64) -> Bool:
         return id in self._results or id in self._errors or id in self._located
 
+    def error_of(self, id: UInt64) -> Optional[String]:
+        """The error of object `id`, if its task has failed: what `get`
+        would raise, known without fetching anything. None while it runs,
+        once it has succeeded, and after it's released."""
+        if id in self._errors:
+            try:
+                return self._errors[id]
+            except:
+                pass
+        return None
+
     def _read_one(mut self) raises:
         var f: Optional[Frame]
         try:

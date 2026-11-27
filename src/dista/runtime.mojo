@@ -400,6 +400,12 @@ struct Runtime[*Ts: TaskLike](Movable):
                 return
         raise Error(T.name(), " is not registered with this runtime")
 
+    def client(mut self) -> ref[self._c] Client:
+        """The driver's client, for code that submits on object IDs, as a
+        flow's executor does (`dista.flow`). The client doesn't check that a
+        task is registered, so such code checks its tasks once first."""
+        return self._c
+
     def remote[T: TaskLike](mut self, arg: T.A) raises -> ObjectRef[T.R]:
         """Submits task `T` on `arg` and returns a handle to its result."""
         Self._check_registered[T]()

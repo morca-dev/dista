@@ -129,7 +129,7 @@ struct Emit[X: Movable & Deinitable](Movable):
 trait StreamLike(TaskLike):
     """A task whose results are a stream of objects (`TaskStream`)."""
 
-    comptime Item: Movable
+    comptime Item: Movable & Deinitable
     """The type of each item."""
 
     @staticmethod
