@@ -836,9 +836,11 @@ but not yet taken by the next operator.
   in flight or any stream's next item or end.
 - **A full operator stops the one before it, back to the read.** A `Read`
   runs up to `streams` inputs at once (default 4), each a stream with a
-  `window` (default 16). The executor calls `rt.next` on a stream only when
-  the next operator has room, so the stream's `put` blocks on its window,
-  which is the backpressure streams were built to give.
+  `window` (default 16), and fewer when the operators after it share its
+  group's slots (see "Streams that hold every slot"). The executor calls
+  `rt.next` on a stream only when the next operator has room, so the
+  stream's `put` blocks on its window, which is the backpressure streams
+  were built to give.
 - **Peak objects** are therefore `streams × window` plus the sum of the
   budgets, whatever the dataset's size. Budgets count batches, not bytes,
   as the window does: a read that makes batches of a bounded size bounds
@@ -949,7 +951,7 @@ Why not actors, which exist:
 - **The API.** `StatefulTask[S, A, R, new, f, group=""]` is in `dista.task` and exported from `dista`, with its trait `StatefulLike`. `MapWith[T, budget=16]` is in `dista.flow` beside `Map`, and in the executor it is one. `MapWith` takes a `StatefulLike`, so a plain `Task` in it doesn't compile (a `tests/compile_fail` case). A `Map` refuses a `StatefulTask` at `start` with `a StatefulTask goes in a MapWith`, so that a flow says which of its operators keep a state. Operators now carry a `KIND`, which the error names (`operator 2 (MapWith ...)`).
 - **On the worker.** The worker keeps a `WorkerStates` on the heap, one entry per stateful task type, made on the first call of that type. Its address goes into the loop's `TaskContext` and every slot's, and the runtime's dispatch hands it to the task, which takes the entry's lock, builds the state if there is none, calls the function and lets go. So the head, the frames and the driver are unchanged, and the driver has no table: a `StatefulTask` run outside a worker raises. The states are destroyed with the worker, except when it leaves with a slot still running, when they are left to the process's exit, as the executors' shared state is.
 - **A call waiting for the lock keeps its slot.** On a worker of 4 slots, four calls of one stateful task hold all four while three wait, so the worker's other tasks run beside them only in the slots the calls don't hold. The head doesn't know which tasks share a lock, and teaching it would change the head; a group whose workers run little else, as a gpu group does, loses nothing.
-- **The flow test runs six workers of no group beside the two gpu ones.** With three, the flow hung with nothing running: the read's four streams each hold a worker of no group while they wait for their reader, which waits for the first `Map`, whose tasks need one of those workers. That is PR 1's executor, not the state, and it is left for a follow-up: a read's `streams` should stay below the workers that run the operators after it.
+- **The flow test first ran six workers of no group beside the two gpu ones.** With three, the flow hung with nothing running: the read's four streams each hold a worker of no group while they wait for their reader, which waits for the first `Map`, whose tasks need one of those workers. That was PR 1's executor, not the state. It is fixed since (see "Streams that hold every slot" below), and the test runs two workers of no group.
 - **The table is taken by pointer, not as `mut self`.** The first version's lookup was a `mut self` method on the shared table. A `mut` argument is assumed to be the only reference to its value, and three slots each found the table empty after taking its lock and built a state of their own: the 4-slot test failed on every run. The lookup is now a static method on a pointer, as the executors' shared state is reached.
 
 ### PR 3 against the plan
@@ -961,6 +963,14 @@ Why not actors, which exist:
 - **A head restart.** The driver replays the flow's tasks itself, under the same IDs, so each settles once and nothing is counted twice; its streams are interrupted, and the flow reads their inputs again. `tests/head_restart.sh` runs a flow with its streams open across the restart and checks it exact with at least one input read again.
 - **The tests.** In local mode, `DISTA_TASK_RETRIES=0` makes a `Map` task that kills its worker a loss, since the head doesn't run it again; a stream that kills its worker after 10 items is one without it. `tests/flow_loss.sh` holds the last operator, lets the first `Map`'s 100 KB results pile up on four workers, and kills the one that made the most by its pid.
 - **No core bug** turned up. The core change is `dista/loss.mojo` and its constants used where the messages were built.
+
+### Streams that hold every slot (#166)
+
+- **What was wrong.** A running stream holds a slot of its worker until it ends, and keeps it once its window is full and it waits for its reader. The executor reads a stream only when the first `Map` has room, and that `Map`'s tasks need a free slot of their group. With `Runtime(workers=2)` and a `Read` of the default 4 streams followed by a `Map`, all in no group, two streams held both workers, the `Map`'s 16 tasks and the other two streams waited at the head, and nothing ever finished. One worker of two slots (`DISTA_WORKER_SLOTS=2`) hung the same way: the count is in slots, not workers.
+- **The cap.** When an operator after the read runs in the read's group, the read opens at most that group's slots less one streams at once, at least one and at most its `streams`. The slots are those the group's workers have room to fill, draining ones left out. The executor asks the head at `start`, again before it opens a stream, and every 100 ms while the cap is below the read's `streams` and inputs are left to open (its wait for the flow's tasks then ends after 100 ms), so workers that join, as in local mode just after `start` or under autoscaling, raise it. A cap that falls below the streams already open closes none of them. A read whose group no later operator uses isn't capped and asks nothing.
+- **One slot raises.** If the group has one slot and no more of its workers can join, the flow raises `operator 0 (Read ...) can't run: no group's workers have 1 slot, ...` from `start` or `next`, before it would hang. The head knows no more can join only in local mode, once every worker it forked in the group has said hello or gone away. In a cluster one may join at any time, so a group of one slot there runs one stream and waits for another worker.
+- **On the wire.** The stats frame now names a group in its payload, and the head's reply adds that group's slots and whether no more of its workers can join after the five counts. `Client.group_slots(group)` asks. An older driver sends an empty payload and reads the five counts, so it works with a newer head; a newer driver with an older head gets no slots, and its read keeps its `streams`, as before.
+- **What still can hang.** Streams of other drivers holding the group's slots, a group whose slots shrink, by workers lost or drained, below the streams already open, and a cluster group of one slot that never grows. In those the executor can't tell a flow that waits for a slot from one that will never get it, and it raises only where it can.
 
 ### Defaults (confirmed 2026-11-27)
 

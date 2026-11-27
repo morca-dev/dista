@@ -10,7 +10,7 @@ every batch on a gpu worker, each of which builds its state once.
 The tasks that write files find their directory in `FLOW_TEST_DIR`, set
 before a `Runtime` forks its workers, which inherit it."""
 
-from std.ffi import c_int, external_call
+from std.ffi import c_int, c_uint, external_call
 from std.os import getenv, listdir, makedirs, remove, setenv, unsetenv
 from std.os.path import exists
 from std.testing import TestSuite, assert_equal, assert_true
@@ -473,8 +473,9 @@ def test_a_map_with_runs_on_gpu_workers_with_a_state_each() raises:
     for name in listdir(dir):
         remove(String(dir, "/", name))
     _ = setenv("FLOW_TEST_DIR", dir)
-    # Six workers of no group, as above: the read's 4 streams each hold one.
-    var rt = Runtime[ItemsOf, AddOne, Double, Untag](workers=6, groups="gpu=2")
+    # Two workers of no group: the read opens one stream, which holds one of
+    # them, and the other runs the `Map`s (#166).
+    var rt = Runtime[ItemsOf, AddOne, Double, Untag](workers=2, groups="gpu=2")
     var out = Doubled.run(rt, _inputs(20))
     assert_equal(len(out), 20 * ITEMS)
     for i in range(20):
@@ -487,6 +488,59 @@ def test_a_map_with_runs_on_gpu_workers_with_a_state_each() raises:
             assert_equal(f.read(), "gpu")
         builds += 1
     assert_true(builds >= 1 and builds <= 2, String(builds))
+    _assert_empty(rt)
+
+
+def _watchdog(seconds: Int):
+    """Ends this process with SIGALRM after `seconds`, so a flow that hangs
+    fails the test file rather than blocking it; 0 turns it off."""
+    _ = external_call["alarm", c_uint](c_uint(seconds))
+
+
+def test_a_read_with_more_streams_than_workers_finishes() raises:
+    """Two workers of no group, a read of 4 streams and a `Map` in the same
+    group (#166): the streams mustn't hold both workers."""
+    var rt = Runtime[ItemsOf, AddOne, Label](workers=2)
+    _watchdog(60)
+    var out = Labels.run(rt, _inputs(10))
+    _watchdog(0)
+    _assert_exact(out, 10)
+    _assert_empty(rt)
+
+
+def test_a_read_on_one_worker_of_two_slots_finishes() raises:
+    """The same with one worker of two slots: a stream holds a slot, not a
+    worker."""
+    _ = setenv("DISTA_WORKER_SLOTS", "2")
+    var rt = Runtime[ItemsOf, AddOne, Label](workers=1)
+    _ = unsetenv("DISTA_WORKER_SLOTS")
+    _watchdog(60)
+    var out = Labels.run(rt, _inputs(10))
+    _watchdog(0)
+    _assert_exact(out, 10)
+    _assert_empty(rt)
+
+
+def test_a_read_whose_stream_would_hold_the_only_slot_raises() raises:
+    """One worker of one slot: the read's one stream would hold it, and the
+    `Map` would never run. The flow raises, at `start` or at a `next`,
+    depending on whether the worker has said hello yet."""
+    var rt = Runtime[ItemsOf, AddOne, Label](workers=1)
+    _watchdog(60)
+    var msg = String()
+    try:
+        _ = Labels.run(rt, _inputs(3))
+    except e:
+        msg = String(e)
+    _watchdog(0)
+    print("  ", msg)
+    assert_true(
+        msg.startswith(
+            "operator 0 (Read test_flow::items_of) can't run: no group's"
+            " workers have 1 slot"
+        ),
+        msg,
+    )
     _assert_empty(rt)
 
 
