@@ -14,7 +14,7 @@ Every frame is a 4-byte little-endian length, then that many bytes:
 | 1 task | driver to head, head to worker | the encoded argument |
 | 2 result | worker to head, head to driver | the encoded result |
 | 3 error | worker to head, head to driver | a UTF-8 message |
-| 4 hello | driver, worker or observer to head | role byte (`ROLE_*`), the registry hash u64 (an observer's is ignored); a worker adds its object server's address |
+| 4 hello | driver, worker or observer to head | role byte (`ROLE_*`), the registry hash u64 (an observer's is ignored); a worker adds its object server's address, then its slots u64 when not 1, or when it has a group, then its group as a length byte and the name |
 | 5 welcome | head to driver | the driver's number, u64, then the head's epoch, u64 |
 | 6 task-after | driver to head | flags byte (`GATHER`, `WITH_VALUE`, `MANY`, `STREAM`), with `MANY` the result count u64 or with `STREAM` the window u64, count u64, then that many object IDs; with `WITH_VALUE`, a length u64 and the encoded value |
 | 7 stored | worker to head | the result's size, u64: it stayed on the worker |
@@ -49,6 +49,14 @@ Every frame is a 4-byte little-endian length, then that many bytes:
 | 36 task-stream | driver to head, head to worker | the window u64, then the encoded argument; the object ID is the stream's end, and its items are the IDs after it |
 | 37 credit | driver to head, head to the stream's worker | how many of the stream's items the driver has taken, u64, a running total; the object ID is the stream's |
 | 38 stream-stop | head to the stream's worker | none: the stream's task's next `put` raises "cancelled" |
+| 39 groups | driver to head, after its welcome | count u64, then per task its ID u64 and its worker group's name, a length byte and the bytes; sent only by a registry with a group |
+
+A worker started with `DISTA_GROUP` is in that group, and a task whose type
+names a group (`group=`) runs only on a worker of it; a task with none, only
+on a worker with none. The head doesn't know a program's tasks, so a driver
+whose registry has a group says which after its welcome, in a groups frame,
+and again after a resuming welcome, before its replay. A program without
+groups sends no groups frame and the hello it sent before groups.
 
 A frame holds at most `MAX_FRAME` bytes, so a result larger than that
 crosses hosts in parts. A fetcher says it takes parts by putting the largest
@@ -131,6 +139,7 @@ from std.memory import bitcast
 
 from dista.codec import get_scalar, put_scalar
 from dista.socket import Stream
+from dista.task import MAX_GROUP, check_group
 
 comptime KIND_TASK: UInt8 = 1
 comptime KIND_RESULT: UInt8 = 2
@@ -191,6 +200,10 @@ stream's. The head drops it for a stream that isn't running."""
 comptime KIND_STREAM_STOP: UInt8 = 38
 """Head to the stream's worker, no payload: the stream's driver cancelled
 it, released it or left, so the task's next `put` raises "cancelled"."""
+comptime KIND_GROUPS: UInt8 = 39
+"""Driver to head, once after its welcome: which of its tasks run in which
+worker group. Count u64, then per task its ID u64, a length byte and the
+group's name. A registry with no group sends none."""
 comptime GATHER: UInt8 = 1
 """Task-after and task-inputs flag: the inputs gather into a `Seq`."""
 comptime WITH_VALUE: UInt8 = 2
@@ -450,6 +463,44 @@ def read_frame(s: Stream) raises -> Optional[Frame]:
     var object_id = get_scalar[DType.uint64](Span(header), pos)
     var task_id = get_scalar[DType.uint64](Span(header), pos)
     return Frame(header[0], object_id, task_id, payload^)
+
+
+def encode_groups(ids: List[UInt64], names: List[String]) -> List[UInt8]:
+    """A groups frame's payload: task `ids[k]` runs in group `names[k]`."""
+    var out = List[UInt8]()
+    put_scalar[DType.uint64](out, UInt64(len(ids)))
+    for k in range(len(ids)):
+        put_scalar[DType.uint64](out, ids[k])
+        var b = names[k].as_bytes()
+        out.append(UInt8(len(b)))
+        out.extend(b)
+    return out^
+
+
+def parse_groups(payload: Span[UInt8, _]) raises -> Dict[UInt64, String]:
+    """A groups frame's table, task ID to group name, each name checked."""
+    var pos = 0
+    if len(payload) < 8:
+        raise Error("truncated groups frame")
+    var n = Int(get_scalar[DType.uint64](payload, pos))
+    if n < 0 or n > (len(payload) - pos) // 10:
+        raise Error("groups frame with a bad count ", n)
+    var out = Dict[UInt64, String]()
+    for _ in range(n):
+        if pos + 9 > len(payload):
+            raise Error("truncated groups frame")
+        var id = get_scalar[DType.uint64](payload, pos)
+        var size = Int(payload[pos])
+        pos += 1
+        if size > MAX_GROUP or pos + size > len(payload):
+            raise Error("truncated groups frame")
+        var name = String(from_utf8_lossy=payload[pos : pos + size])
+        pos += size
+        check_group(name)
+        out[id] = name^
+    if pos != len(payload):
+        raise Error("groups frame with ", len(payload) - pos, " bytes over")
+    return out^
 
 
 def encode_addr(ip: Array[UInt8, 4], port: Int) -> List[UInt8]:

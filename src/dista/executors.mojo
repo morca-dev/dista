@@ -204,6 +204,7 @@ struct _Shared(Movable):
         head_addr: String,
         resume_at: String,
         registry_hash: UInt64,
+        groups: List[UInt8],
     ) raises:
         self.mutex = Mutex()
         self.cond = CondVar()
@@ -218,7 +219,9 @@ struct _Shared(Movable):
         for _ in range(n):
             self.state.append(IDLE)
             self.jobs.append(Job())
-            self.ctxs.append(TaskContext(head_addr, resume_at, registry_hash))
+            self.ctxs.append(
+                TaskContext(head_addr, resume_at, registry_hash, groups.copy())
+            )
             self.mail.append(List[StreamItem]())
             self.window.append(0)
             self.taken.append(0)
@@ -280,6 +283,7 @@ struct Executors[dispatch: DispatchFn](Movable):
         head_addr: String = "",
         resume_at: String = "",
         registry_hash: UInt64 = 0,
+        groups: List[UInt8] = List[UInt8](),
     ) raises:
         if n < 1:
             raise Error("a worker needs at least one slot")
@@ -294,7 +298,7 @@ struct Executors[dispatch: DispatchFn](Movable):
         self._wake_r = fds[0]
         self._shared = unsafe_alloc[_Shared](1)
         self._shared.unsafe_write(
-            _Shared(n, fds[1], head_addr, resume_at, registry_hash)
+            _Shared(n, fds[1], head_addr, resume_at, registry_hash, groups)
         )
         self._threads = List[ThreadHandle](capacity=n)
         self._busy = List[Bool](capacity=n)

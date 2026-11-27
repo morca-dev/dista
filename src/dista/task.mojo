@@ -18,6 +18,16 @@ Every node runs the same binary, so a task message names the task by ID: a
 and argument types. The hash is fixed, unlike `hash()`, so a driver and a
 worker started separately agree on it.
 
+A task may name a worker group, and then runs only on workers started with
+that `DISTA_GROUP`; one without runs only on workers without:
+
+```mojo
+comptime Encode = Task[String, Vectors, encode, group="gpu"]
+```
+
+The parameter is `group`, so the trait's method for it is `group_name()`:
+Mojo doesn't let a member share a parameter's name.
+
 An actor is a state type and the function that builds it, and each of its
 methods is a function taking the state `mut`:
 
@@ -56,6 +66,31 @@ def fnv1a64(s: StringSpan) -> UInt64:
     return h
 
 
+comptime MAX_GROUP = 32
+"""The longest worker group name, in bytes."""
+
+
+def check_group(name: StringSpan) raises:
+    """Raises unless `name` is a worker group's name: 1 to `MAX_GROUP` bytes
+    of lowercase letters, digits, `-` and `_`."""
+    var b = name.as_bytes()
+    var ok = len(b) >= 1 and len(b) <= MAX_GROUP
+    for c in b:
+        if not (
+            (c >= UInt8(ord("a")) and c <= UInt8(ord("z")))
+            or (c >= UInt8(ord("0")) and c <= UInt8(ord("9")))
+            or c == UInt8(ord("-"))
+            or c == UInt8(ord("_"))
+        ):
+            ok = False
+    if not ok:
+        raise Error(
+            "bad worker group name '",
+            name,
+            "': it takes 1 to 32 bytes of lowercase letters, digits, - and _",
+        )
+
+
 comptime StatePtr = Pointer[NoneType, MutUntrackedOrigin]
 """An actor's state on its worker, with its type erased."""
 
@@ -84,6 +119,12 @@ trait TaskLike:
         """Decodes the argument, calls the function, appends the encoded result.
         """
         raise Error(Self.name(), " is not a task")
+
+    @staticmethod
+    def group_name() -> StaticString:
+        """The worker group it runs in, its `group=`; "" for none. A method
+        has none: it runs where its actor is."""
+        return ""
 
     @staticmethod
     def arity() -> Int:
@@ -176,6 +217,7 @@ struct Task[
     A_: Movable & Deinitable,
     R_: Movable & Deinitable,
     f: def(A_) thin raises -> R_,
+    group: StaticString = "",
 ](TaskLike):
     """A remote function taking one `A_` and returning an `R_`."""
 
@@ -191,6 +233,10 @@ struct Task[
         return fnv1a64(Self.name())
 
     @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
+
+    @staticmethod
     def run(args: Span[UInt8, _], mut out: List[UInt8]) raises:
         var a = _decode_all[Self.A](Self.name(), args)
         var r = Self.f(a)
@@ -202,6 +248,7 @@ struct Task2[
     B_: Movable & Deinitable,
     R_: Movable & Deinitable,
     f: def(A_, B_) thin raises -> R_,
+    group: StaticString = "",
 ](Task2Like):
     """A remote function taking two arguments: `rt.remote[T](a, b)`.
 
@@ -223,6 +270,10 @@ struct Task2[
         return fnv1a64(Self.name())
 
     @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
+
+    @staticmethod
     def arity() -> Int:
         return 2
 
@@ -241,6 +292,7 @@ struct Task3[
     C_: Movable & Deinitable,
     R_: Movable & Deinitable,
     f: def(A_, B_, C_) thin raises -> R_,
+    group: StaticString = "",
 ](Task3Like):
     """A remote function taking three arguments: `rt.remote[T](a, b, c)`.
     See `Task2`."""
@@ -257,6 +309,10 @@ struct Task3[
     @staticmethod
     def id() -> UInt64:
         return fnv1a64(Self.name())
+
+    @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
 
     @staticmethod
     def arity() -> Int:
@@ -282,6 +338,7 @@ struct TaskWith[
     X: Copyable & Deinitable,
     R_: Movable & Deinitable,
     f: def(A_, Seq[X]) thin raises -> R_,
+    group: StaticString = "",
 ](TaskLike):
     """A task taking a value and other tasks' results, gathered in order:
     `f(a, xs)`, submitted as `rt.remote[T](a, refs)`. A shuffle's reducer is
@@ -300,6 +357,10 @@ struct TaskWith[
         return fnv1a64(Self.name())
 
     @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
+
+    @staticmethod
     def run(args: Span[UInt8, _], mut out: List[UInt8]) raises:
         var pos = 0
         var a = decode[Self.A](args, pos)
@@ -316,6 +377,7 @@ struct TaskMany[
     A_: Movable & Deinitable,
     X: Copyable & Deinitable,
     f: def(A_) thin raises -> Seq[X],
+    group: StaticString = "",
 ](ManyLike):
     """A task with several results, each its own object: `rt.remote_many[T](a,
     n)` returns `n` `ObjectRef[X]`s, and `f` must return a `Seq` of exactly
@@ -337,6 +399,10 @@ struct TaskMany[
     @staticmethod
     def id() -> UInt64:
         return fnv1a64(Self.name())
+
+    @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
 
     @staticmethod
     def is_many() -> Bool:
@@ -374,6 +440,7 @@ struct Actor[
     S_: Movable & Deinitable,
     A_: Movable & Deinitable,
     new: def(A_) thin raises -> S_,
+    group: StaticString = "",
 ](ActorLike):
     """An actor whose state is an `S_`, built by `new` from an `A_`."""
 
@@ -388,6 +455,10 @@ struct Actor[
     @staticmethod
     def id() -> UInt64:
         return fnv1a64(Self.name())
+
+    @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
 
     @staticmethod
     def is_actor() -> Bool:

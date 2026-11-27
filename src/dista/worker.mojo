@@ -129,7 +129,7 @@ from dista.metrics import (
 from dista.head import owner_of
 from memory_region import SharedMapping
 from dista.signals import take_wakes, wake_on_sigterm
-from dista.task import StatePtr, split_parts
+from dista.task import StatePtr, check_group, split_parts
 from dista.sizing import (
     CAPACITY_ANNOUNCE,
     InFlight,
@@ -194,6 +194,31 @@ comptime SaveFn = def(UInt64, StatePtr, mut List[UInt8]) thin raises
 
 comptime RestoreFn = def(UInt64, List[UInt8]) thin raises -> StatePtr
 """Builds actor type `type_id`'s state from a checkpoint."""
+
+
+def worker_hello(
+    registry_hash: UInt64,
+    ip: Array[UInt8, 4],
+    port: Int,
+    slots: Int,
+    group: String = "",
+) -> List[UInt8]:
+    """A worker's hello: its role, registry hash and address, then its slots
+    when not 1 or when it has a group, then its group, a length byte and the
+    name."""
+    var hello: List[UInt8] = [ROLE_WORKER]
+    put_scalar[DType.uint64](hello, registry_hash)
+    hello.extend(encode_addr(ip, port))
+    # Its slots, when not 1: a hello without them is a worker's from before
+    # slots, which a head before them requires. A worker of a group sends
+    # them always, so its group comes at a fixed place.
+    if slots != 1 or group != "":
+        put_scalar[DType.uint64](hello, UInt64(slots))
+    if group != "":
+        var b = group.as_bytes()
+        hello.append(UInt8(len(b)))
+        hello.extend(b)
+    return hello^
 
 
 @fieldwise_init
@@ -510,6 +535,8 @@ struct Worker[
     var _adopted: Int
     var stopped: Bool
     """The head said stop, or the worker drained: `run` returned for good."""
+    var _group: String
+    """`DISTA_GROUP`: the worker group whose tasks it runs; "" for none."""
     var _slots: Int
     """`DISTA_WORKER_SLOTS`: tasks run at once. With 1, on the loop's thread,
     as before slots; with more, on `_pool`'s threads."""
@@ -556,23 +583,32 @@ struct Worker[
         head_addr: String = "",
         resume_at: String = "",
         sharing: Int = 1,
+        groups: List[UInt8] = List[UInt8](),
     ) raises:
         """Starts the object server and says hello to the head on `head`.
 
         `head_addr` is where a task's client connects, and `resume_at` where
         it reconnects after a head restart ("" in local mode). `sharing`
-        workers share the run's grant (`DISTA_WORKER_SLOTS=auto`)."""
+        workers share the run's grant (`DISTA_WORKER_SLOTS=auto`). `groups`
+        is the registry's groups frame, which a task's client sends. Its own
+        group is `DISTA_GROUP`, checked here."""
+        var group = getenv("DISTA_GROUP")
+        if group != "":
+            check_group(group)
         var listener = Listener(0, any_interface=True)
         var advertise = getenv("DISTA_ADVERTISE")
         var ip = resolve_ipv4(advertise) if advertise != "" else head.local_ip()
         self._key = addr_key(ip, listener.port)
         self._slots = worker_slots(sharing)
+        self._group = group
         self._head = Conn(head^)
         self._head.send(
             KIND_HELLO,
             0,
             0,
-            Self._hello(registry_hash, ip, listener.port, self._slots),
+            worker_hello(
+                registry_hash, ip, listener.port, self._slots, self._group
+            ),
         )
         self._listener = listener^
         self._serving = List[Conn]()
@@ -619,7 +655,9 @@ struct Worker[
         self._answers = Dict[UInt64, _Answer]()
         self._calls = 0
         self._checkpointed = False
-        self._ctx = TaskContext(head_addr, resume_at, registry_hash)
+        self._ctx = TaskContext(
+            head_addr, resume_at, registry_hash, groups.copy()
+        )
         self._metrics = None
         try:
             self._metrics = metrics_listener()
@@ -646,7 +684,7 @@ struct Worker[
         self._pool = None
         if self._slots > 1:
             self._pool = Executors[Self.dispatch](
-                self._slots, head_addr, resume_at, registry_hash
+                self._slots, head_addr, resume_at, registry_hash, groups
             )
         self._inflight = None
         self._learned = Learned()
@@ -656,19 +694,6 @@ struct Worker[
             self._sizing.value().base = resident_bytes()
             if self._pool:
                 self._inflight = InFlight(self._slots)
-
-    @staticmethod
-    def _hello(
-        registry_hash: UInt64, ip: Array[UInt8, 4], port: Int, slots: Int
-    ) -> List[UInt8]:
-        var hello: List[UInt8] = [ROLE_WORKER]
-        put_scalar[DType.uint64](hello, registry_hash)
-        hello.extend(encode_addr(ip, port))
-        # Its slots, when not 1: a hello without them is a worker's from
-        # before slots, which a head before them requires.
-        if slots != 1:
-            put_scalar[DType.uint64](hello, UInt64(slots))
-        return hello^
 
     def rejoin(mut self, var head: Stream, registry_hash: UInt64) raises:
         """Says hello to a new head and reports the results held here."""
@@ -694,7 +719,9 @@ struct Worker[
             KIND_HELLO,
             0,
             0,
-            Self._hello(registry_hash, self._ip, self._port, self._slots),
+            worker_hello(
+                registry_hash, self._ip, self._port, self._slots, self._group
+            ),
         )
         var body = List[UInt8]()
         put_scalar[DType.uint64](
