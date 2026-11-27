@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`rt.wait(refs, count, timeout)`** returns which of several refs have finished, without reading them; `rt.wait(ids)` takes object ids, for refs of several result types.
-- **`TaskStream`**, `rt.stream` and `rt.next`: a task hands over each result as it makes it, each an object of its own; the window isn't enforced yet.
+- **`TaskStream`**, `rt.stream` and `rt.next`: a task hands over each result as it makes it, each an object of its own.
+- **A stream's window and cancelling:** `put` waits while `window` items are unread, and `rt.cancel(s)`, `rt.release(s)` or a departed driver makes it raise `cancelled`.
 
 ## [0.6.2] - 2026-11-26
 

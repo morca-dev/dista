@@ -63,7 +63,11 @@ frame whose task ID is the stream's. The head holds each for the stream's
 driver, as if the driver had submitted it, and delivers it like any result.
 The stream is in flight until its own ID is answered, with the number of
 items or an error. A stream whose worker goes away runs again elsewhere only
-if none of its items was answered yet; otherwise its end fails.
+if none of its items was answered yet; otherwise its end fails. The driver's
+credits, how many items it has taken, go on to the stream's worker, whose
+`put` waits for them once the window is full. When the driver cancels the
+stream, releases it before it ended, or leaves, the head sends the worker a
+stream-stop, and drops whatever the stream answers after.
 
 A worker told to stop drains (see `worker.mojo`). The head sends it no more
 tasks and has the other workers adopt every result it holds: each fetches
@@ -121,6 +125,7 @@ from dista.frame import (
     KIND_ADOPT,
     KIND_ADOPTED,
     KIND_CANCEL,
+    KIND_CREDIT,
     KIND_CAPACITY,
     KIND_CHECKPOINT,
     KIND_CHECKPOINTED,
@@ -147,6 +152,7 @@ from dista.frame import (
     KIND_STOP,
     KIND_TASK_MANY,
     KIND_TASK_STREAM,
+    KIND_STREAM_STOP,
     GATHER,
     WITH_VALUE,
     MANY,
@@ -470,6 +476,9 @@ struct Head(Movable):
     """Each `TaskStream` submitted and not ended, by its own ID, with how
     many of its items have been answered: a stream with any can't run again.
     """
+    var _stream_at: Dict[UInt64, Int]
+    """Each running `TaskStream`, by its own ID, with the worker running it:
+    where its credits and its stop go."""
     var _waiting: Dict[UInt64, _Task]
     """Tasks waiting for their inputs, by object, oldest first."""
     var _waiters: Dict[UInt64, List[UInt64]]
@@ -652,6 +661,7 @@ struct Head(Movable):
         self._stopped = False
         self._many = Dict[UInt64, Int]()
         self._streams = Dict[UInt64, Int]()
+        self._stream_at = Dict[UInt64, Int]()
         self._running = Dict[UInt64, _Task]()
         self._tries = Dict[UInt64, Int]()
         self._task_timeout = 0
@@ -1533,6 +1543,8 @@ struct Head(Movable):
                 self._kill(f.object_id)
             elif f.kind == KIND_CANCEL:
                 self._cancel(f.object_id)
+            elif f.kind == KIND_CREDIT:
+                self._credit(f^)
             elif f.kind == KIND_CHECKPOINT:
                 self._ask_checkpoint(f^)
             elif f.kind == KIND_TIMELINE:
@@ -1787,6 +1799,36 @@ struct Head(Movable):
             self._hold(obj)
             self._streams[stream] = self._streams.get(stream, 0) + 1
         return True
+
+    def _credit(mut self, var f: Frame) raises:
+        """A driver took items of the stream `f` names: passed on to the
+        worker running it, and dropped for a stream not running."""
+        if len(f.payload) != 8:
+            raise Error("a credit must be one u64")
+        var obj = f.object_id
+        var w = self._stream_at.get(obj, -1)
+        if w < 0 or obj not in self._streams or obj in self._dead:
+            return
+        if self._roles[w] != ROLE_WORKER:
+            return
+        try:
+            self._conns[w].send(KIND_CREDIT, obj, 0, f.payload)
+        except e:
+            print("dista head: lost worker:", e)
+            self._drop(w)
+
+    def _stop_stream(mut self, obj: UInt64):
+        """Tells the worker running stream `obj`, if one is, that nobody
+        reads it any more: its task's next `put` raises "cancelled". What it
+        answers after is dropped (`_stream_item`)."""
+        var w = self._stream_at.pop(obj, -1)
+        if w < 0 or self._roles[w] != ROLE_WORKER:
+            return
+        try:
+            self._conns[w].send(KIND_STREAM_STOP, obj, 0, List[UInt8]())
+        except e:
+            print("dista head: lost worker:", e)
+            self._drop(w)
 
     def _resume_actor(mut self, a: UInt64):
         """An actor created again by a driver resuming after a head restart:
@@ -2221,7 +2263,10 @@ struct Head(Movable):
             self._drop(i)
 
     def _fail_all(mut self, first: UInt64, var msg: String):
-        """Fails a task's result, and if it's a `TaskMany`, every one."""
+        """Fails a task's result, and if it's a `TaskMany`, every one. A
+        stream running on a worker is told to stop."""
+        if first in self._stream_at:
+            self._stop_stream(first)
         var parts = self._many.get(first, 1)
         for k in range(1, parts):
             self._fail(first + UInt64(k), msg.copy())
@@ -2321,6 +2366,7 @@ struct Head(Movable):
         """`object_id`'s task is done: it no longer holds its inputs."""
         _ = self._many.pop(object_id, 0)
         _ = self._streams.pop(object_id, 0)
+        _ = self._stream_at.pop(object_id, -1)
         _ = self._running.pop(object_id, _Task(0, 0, List[UInt8]()))
         _ = self._tries.pop(object_id, 0)
         _ = self._due.pop(object_id, 0)
@@ -2428,6 +2474,9 @@ struct Head(Movable):
             self._free(object_id)
         else:
             self._dead[object_id] = True
+            if object_id in self._stream_at:
+                # A running stream nobody holds: its items would be dropped.
+                self._stop_stream(object_id)
 
     def _free(mut self, object_id: UInt64):
         """Forgets a settled object, and has its worker delete it."""
@@ -2501,6 +2550,12 @@ struct Head(Movable):
                     holding_out.append(entry.key)
             for obj in holding_out:
                 _ = self._holdouts.pop(obj, -1)
+            var streams = List[UInt64]()
+            for entry in self._stream_at.items():
+                if entry.value == i:
+                    streams.append(entry.key)
+            for obj in streams:
+                _ = self._stream_at.pop(obj, -1)
             var a = self._hosting[i]
             self._hosting[i] = 0
             var replays = Dict[UInt64, Bool]()
@@ -3282,6 +3337,8 @@ struct Head(Movable):
                     continue
                 var obj = t.object_id
                 self._tries[obj] = self._tries.get(obj, 0) + 1
+                if t.kind == KIND_TASK_STREAM:
+                    self._stream_at[obj] = i
                 if self._task_timeout > 0:
                     self._due[obj] = wall_ns() + self._task_timeout
                 # Sent from the task itself, which then moves into `_running`:
@@ -3297,7 +3354,12 @@ struct Head(Movable):
                 except e:
                     print("dista head: lost worker:", e)
                     lost = True
+                var stop = t.kind == KIND_TASK_STREAM and obj in self._dead
                 # Running before the drop, which sends it to another worker.
                 self._running[obj] = t^
                 if lost:
                     self._drop(i)
+                elif stop:
+                    # Run again after its worker went away, but released
+                    # meanwhile: nobody reads it.
+                    self._stop_stream(obj)

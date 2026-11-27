@@ -25,6 +25,13 @@ finished jobs, in one hold of the mutex: an executor leaves its job's items
 before it marks the job done, so a stream's items always reach the loop
 before, or with, its end.
 
+A stream's window is kept per slot under the same mutex: the items its task
+has put, the items its driver has taken (the loop sets that when a credit
+comes) and whether the stream was stopped. A `put` with the window full
+waits on a second condition, `room`, which the loop signals on a credit or
+a stop, and which ending the executors signals too, so a worker can still
+leave while a stream waits for its reader.
+
 A thread body can't raise or capture (see the threads tin), so an executor
 catches its task's error and hands it back as the job's.
 
@@ -104,6 +111,9 @@ struct Job(Movable):
     var epoch: Int
     """The worker's head connection it was started under: one finished after
     the worker rejoined a new head is dropped."""
+    var window: Int
+    """A `TaskStream`'s window: how many items it may put that its driver
+    hasn't taken; 0, any."""
     var started: UInt64
     var ended: UInt64
     var ok: Bool
@@ -119,6 +129,7 @@ struct Job(Movable):
         var args: List[UInt8] = List[UInt8](),
         many: Int = 0,
         epoch: Int = 0,
+        window: Int = 0,
     ):
         self.object_id = object_id
         self.task_id = task_id
@@ -127,6 +138,7 @@ struct Job(Movable):
         self.args = args^
         self.many = many
         self.epoch = epoch
+        self.window = window
         self.started = 0
         self.ended = 0
         self.ok = False
@@ -158,6 +170,9 @@ struct _Shared(Movable):
 
     var mutex: Mutex
     var cond: CondVar
+    var room: CondVar
+    """Signalled when a waiting `put` may go on: a credit, a stop, or the
+    executors ending. Waited on under `mutex`."""
     var state: List[Int]
     """Each slot's state: `IDLE`, `STARTED` or `DONE`. Under `mutex`."""
     var jobs: List[Job]
@@ -168,6 +183,13 @@ struct _Shared(Movable):
     var mail: List[List[StreamItem]]
     """Each slot's mailbox: the items its stream put that the loop hasn't
     taken. Under `mutex`."""
+    var window: List[Int]
+    """Each slot's stream's window; 0, any. Under `mutex`."""
+    var taken: List[Int]
+    """How many of each slot's stream's items its driver has taken, as the
+    last credit said. Under `mutex`."""
+    var halted: List[Bool]
+    """Each slot's stream was stopped: its `put` raises. Under `mutex`."""
     var next: Int
     """The next executor's slot. Under `mutex`."""
     var stop: Bool
@@ -185,15 +207,22 @@ struct _Shared(Movable):
     ) raises:
         self.mutex = Mutex()
         self.cond = CondVar()
+        self.room = CondVar()
         self.state = List[Int](capacity=n)
         self.jobs = List[Job](capacity=n)
         self.ctxs = List[TaskContext](capacity=n)
         self.mail = List[List[StreamItem]](capacity=n)
+        self.window = List[Int](capacity=n)
+        self.taken = List[Int](capacity=n)
+        self.halted = List[Bool](capacity=n)
         for _ in range(n):
             self.state.append(IDLE)
             self.jobs.append(Job())
             self.ctxs.append(TaskContext(head_addr, resume_at, registry_hash))
             self.mail.append(List[StreamItem]())
+            self.window.append(0)
+            self.taken.append(0)
+            self.halted.append(False)
         self.next = 0
         self.stop = False
         self.wake_w = wake_w
@@ -302,14 +331,20 @@ struct Executors[dispatch: DispatchFn](Movable):
                 return i
         return -1
 
-    def start(mut self, slot: Int, var job: Job):
-        """Hands `job` to idle slot `slot`; its executor starts it at once."""
+    def start(mut self, slot: Int, var job: Job, halted: Bool = False):
+        """Hands `job` to idle slot `slot`; its executor starts it at once.
+        A stream's window starts empty; `halted`, it was stopped before it
+        started, and its first `put` raises."""
+        var window = job.window
         # The slot is idle: no executor reads its job until it's started.
         self._shared[].jobs[slot] = job^
         self._busy[slot] = True
         self._running += 1
         ref sh = self._shared[]
         sh.mutex.lock()
+        sh.window[slot] = window
+        sh.taken[slot] = 0
+        sh.halted[slot] = halted
         sh.state[slot] = STARTED
         # Every executor waits on the one condition: wake them all, and the
         # one whose slot it is takes it.
@@ -347,6 +382,26 @@ struct Executors[dispatch: DispatchFn](Movable):
         sh.mutex.unlock()
         return out^
 
+    def credit(mut self, slot: Int, taken: Int):
+        """Slot `slot`'s stream's driver has taken `taken` of its items: a
+        `put` waiting for the window goes on once there's room. A credit
+        older than one already seen changes nothing."""
+        ref sh = self._shared[]
+        sh.mutex.lock()
+        if taken > sh.taken[slot]:
+            sh.taken[slot] = taken
+            sh.room.broadcast()
+        sh.mutex.unlock()
+
+    def halt(mut self, slot: Int):
+        """Stops slot `slot`'s stream: its next `put`, or the one waiting,
+        raises "cancelled"."""
+        ref sh = self._shared[]
+        sh.mutex.lock()
+        sh.halted[slot] = True
+        sh.room.broadcast()
+        sh.mutex.unlock()
+
     def take_items(mut self) -> List[StreamItem]:
         """The items the last `take_done` took, in the order they were put:
         store and report them before the jobs it returned."""
@@ -362,12 +417,31 @@ struct Executors[dispatch: DispatchFn](Movable):
         id: UInt64,
         var bytes: List[UInt8],
     ) raises:
-        """A slot's `put`: leaves the item in the slot's mailbox and wakes
-        the loop, which stores and reports it."""
+        """A slot's `put`: waits while the stream's window is full, then
+        leaves the item in the slot's mailbox and wakes the loop, which
+        stores and reports it. It raises "cancelled" once the stream is
+        stopped, and raises too when the executors end while it waits."""
         var sh = Pointer[_Shared, MutUntrackedOrigin](
             unsafe_from_address=target
         )
+        # Items put before this one: its ID is the stream's plus 1 plus that.
+        var put = Int(id - stream - 1)
         sh[].mutex.lock()
+        while (
+            not sh[].halted[slot]
+            and not sh[].stop
+            and sh[].window[slot] > 0
+            and put - sh[].taken[slot] >= sh[].window[slot]
+        ):
+            sh[].room.wait(sh[].mutex.ref())
+        if sh[].halted[slot]:
+            sh[].mutex.unlock()
+            raise Error("cancelled")
+        if sh[].stop:
+            sh[].mutex.unlock()
+            raise Error(
+                "the worker left while this stream waited for its reader"
+            )
         # The slot's job is its executor's while it runs: this is that thread.
         var epoch = sh[].jobs[slot].epoch
         sh[].mail[slot].append(StreamItem(stream, id, epoch, bytes^))
@@ -389,6 +463,7 @@ struct Executors[dispatch: DispatchFn](Movable):
             if sh.state[i] == STARTED:
                 busy = True
         sh.cond.broadcast()
+        sh.room.broadcast()  # a `put` waiting for its reader gives up
         sh.mutex.unlock()
         if busy:
             for k in range(len(self._threads)):

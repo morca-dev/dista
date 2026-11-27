@@ -30,7 +30,17 @@ the item itself. With several it runs on a slot's thread, and `put` leaves
 the item in that slot's mailbox and wakes the loop, which stores and reports
 it, since only the loop thread may. The task's function sees one `put`.
 
-The window is carried on the wire but not enforced yet: `put` never blocks.
+`put` blocks while the stream has put `window` items more than `next` has
+returned (0 never blocks). The driver says how many it has taken in credit
+frames, which the head passes to the stream's worker: with one slot, `put`
+runs the worker's I/O meanwhile (the head, fetches, peers, `/metrics`) and
+starts no other task; with several, it waits on its slot's condition, which
+the loop signals when a credit comes. A stream nobody reads therefore holds
+`window` items and stops.
+
+`rt.cancel(s)`, `rt.release(s)` before the end, or the driver leaving makes
+the head send the worker a stream-stop, and the task's next `put`, or the one
+waiting, raises "cancelled": the task then ends as any task that raises.
 """
 
 from std.reflection import reflect_fn
@@ -92,8 +102,10 @@ struct Emit[X: Movable & Deinitable](Movable):
     def put(mut self, x: Self.X) raises:
         """Hands `x` over as the stream's next item, an object of its own.
 
-        It raises once the stream has put `ITEMS_PER_STREAM` items, which
-        fails the task.
+        It waits while the stream's window is full, and raises "cancelled"
+        once the stream is cancelled or its driver has gone: let it raise,
+        and the task ends. It raises too once the stream has put
+        `ITEMS_PER_STREAM` items, which fails the task.
         """
         if self._count >= ITEMS_PER_STREAM:
             raise Error(
@@ -185,11 +197,29 @@ struct StreamRef[T: AnyType](Copyable, Movable, Writable):
     """How many items `next` has returned."""
     var _ended: Bool
     """`next` has read the end."""
+    var _window: Int
+    """How many items the task may put that `next` hasn't returned; 0, any.
+    """
+    var _credited: Int
+    """The `_taken` last told the head in a credit frame."""
 
-    def __init__(out self, id: UInt64):
+    def __init__(out self, id: UInt64, window: Int = 0):
         self.id = id
         self._taken = 0
         self._ended = False
+        self._window = window
+        self._credited = 0
+
+    def _credit_due(self, waiting: Bool) -> Bool:
+        """Whether `next` should tell the head how many items it has taken:
+        once that has grown by a quarter of the window, or by any amount
+        when `next` is about to wait for an item. A window of 0 never waits
+        for credit."""
+        if self._window == 0 or self._ended or self._taken <= self._credited:
+            return False
+        return waiting or self._taken - self._credited >= max(
+            1, self._window // 4
+        )
 
     def next_id(self) -> UInt64:
         """The object ID of the item `next` returns next: with `s.id`, what

@@ -25,6 +25,7 @@ from dista.frame import (
     KIND_ACTOR_CREATE,
     KIND_ACTOR_KILL,
     KIND_CANCEL,
+    KIND_CREDIT,
     KIND_CHECKPOINT,
     KIND_CLAIM,
     KIND_COVERED,
@@ -749,8 +750,8 @@ struct Client(Movable):
         to read its items with `next`, each an object of its own.
 
         `window` is how many items the task may put that `next` hasn't
-        returned (0, any); it travels with the task, but isn't enforced yet.
-        The stream's ID and the `ITEMS_PER_STREAM` after it are its own.
+        returned (0, any): its `put` waits while that many are unread. The
+        stream's ID and the `ITEMS_PER_STREAM` after it are its own.
         """
         if window < 0:
             raise Error("a stream's window can't be negative, got ", window)
@@ -761,7 +762,7 @@ struct Client(Movable):
         # Item `k` is `id + 1 + k`: no other object takes those IDs.
         self._counter += UInt64(ITEMS_PER_STREAM)
         self._submit(id, KIND_TASK_STREAM, T.id(), body^, List[UInt64]())
-        return StreamRef[T.Item](id)
+        return StreamRef[T.Item](id, window)
 
     def next[
         X: AnyType
@@ -777,14 +778,23 @@ struct Client(Movable):
         `next` returns None from then on. With `timeout` seconds (negative:
         no limit), it raises an error starting "timed out" if neither the
         item nor the end has come by then; `s` stays valid.
+
+        It tells the head how many items it has taken (a credit), so the
+        task may put more: once that has grown by a quarter of the window,
+        and before it waits for an item. After `cancel(s)` it returns the
+        items already answered and then raises "cancelled".
         """
         if s._ended:
             return None
+        if s.id in self._released:
+            raise Error(s, " was released")
         var deadline = Int(perf_counter_ns()) + Int(max(timeout, 0.0) * 1e9)
         while True:
             var item = s.next_id()
             if self._settled(item):
                 s._taken += 1
+                if s._credit_due(waiting=False):
+                    self._credit(s)
                 return ObjectRef[X](item)
             if self._settled(s.id):
                 # Its items come before its end, so none is still on the way.
@@ -807,6 +817,8 @@ struct Client(Movable):
                         " never came",
                     )
                 return None
+            if s._credit_due(waiting=True):
+                self._credit(s)
             if timeout < 0.0:
                 self._read_one()
                 continue
@@ -815,6 +827,13 @@ struct Client(Movable):
                 raise Error("timed out after ", timeout, " s waiting for ", s)
             if poll_readable([self._head.fd], left // 1_000_000 + 1)[0]:
                 self._read_one()
+
+    def _credit[X: AnyType](mut self, mut s: StreamRef[X]) raises:
+        """Tells the head how many of `s`'s items `next` has returned."""
+        var body = List[UInt8]()
+        put_scalar[DType.uint64](body, UInt64(s._taken))
+        self._send(KIND_CREDIT, s.id, body)
+        s._credited = s._taken
 
     def create[
         T: ActorLike
@@ -1299,6 +1318,15 @@ struct Client(Movable):
         for r in refs:
             self.cancel(r)
 
+    def cancel[X: AnyType](mut self, s: StreamRef[X]) raises:
+        """Cancels stream `s`: its task's next `put`, or the one waiting for
+        the window, raises "cancelled", and the task ends. `next` returns
+        the items already answered, then raises "cancelled". Those items
+        stay until released, as any result."""
+        if s._ended:
+            return
+        self.cancel(ObjectRef[Int](s.id))
+
     def _stored[R: Movable](mut self, id: UInt64) raises -> R:
         """Decodes a result that lives on a worker, from where it was last
         said to be."""
@@ -1345,6 +1373,15 @@ struct Client(Movable):
         """Releases every ref in `refs`."""
         for r in refs:
             self.release(r)
+
+    def release[X: AnyType](mut self, s: StreamRef[X]) raises:
+        """Says this driver is done with stream `s`: releasing one that
+        hasn't ended cancels it, as `cancel` does, and `next` raises from
+        then on. The items `next` returned stay until released. A stream
+        read to its end has nothing left to release."""
+        if s._ended:
+            return
+        self.release(ObjectRef[Int](s.id))
 
     def stats(mut self) raises -> HeadStats:
         """Asks the head what it holds. Frames that arrive first are kept."""
