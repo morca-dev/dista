@@ -34,13 +34,19 @@ every input exists, and fails it if an input failed.
 `stream` runs a `TaskStream`, whose items `next` reads one at a time as the
 task puts them, each an object of its own.
 
+A task whose type names a group (`group="gpu"`) runs only on workers of that
+group: in a cluster, workers started with `DISTA_GROUP=gpu`; in local mode,
+`Runtime(workers=4, groups="gpu=1")` forks one in group `gpu` beside the
+four in none. A task of a group with no worker waits in a cluster and fails
+at once in local mode.
+
 `create` starts an actor on a worker of its own and returns its handle;
 `call` runs one of its methods there, in the order of the calls, and returns
 an `ObjectRef` like a task does; `checkpoint` saves its state to
 `DISTA_CHECKPOINT_URI`; `kill` destroys it.
 """
 
-from std.os import getenv
+from std.os import getenv, setenv, unsetenv
 
 from dista.auth import send_auth
 from dista.client import (
@@ -55,6 +61,7 @@ from dista.client import (
     connect_head,
     write_trace,
 )
+from dista.frame import encode_groups
 from dista.head import Head
 from dista.signals import exit_on_sigterm
 from dista.socket import Listener, Stream, exit_now, fork, wait_child, wall_ns
@@ -67,11 +74,35 @@ from dista.task import (
     Task3Like,
     StatePtr,
     TaskLike,
+    check_group,
     fnv1a64,
 )
 from dista.worker import Worker
 
 comptime DEFAULT_PORT = 6390
+
+
+def _parse_groups(
+    spec: String, mut names: List[String], mut counts: List[Int]
+) raises:
+    """Local mode's `groups`, `"gpu=1,io=2"`: each group's name, checked,
+    and how many workers to fork in it."""
+    if spec == "":
+        return
+    for part in spec.split(","):
+        var kv = part.split("=")
+        if len(kv) != 2:
+            raise Error("groups takes name=count, comma-separated: ", spec)
+        var name = String(kv[0].strip())
+        check_group(name)
+        var n = Int(String(kv[1].strip()))
+        if n < 0:
+            raise Error("a group's worker count must be 0 or more: ", spec)
+        for ref seen in names:
+            if seen == name:
+                raise Error("group ", name, " is given twice: ", spec)
+        names.append(name)
+        counts.append(n)
 
 
 struct Runtime[*Ts: TaskLike](Movable):
@@ -81,14 +112,22 @@ struct Runtime[*Ts: TaskLike](Movable):
     var _c: Client
     var _pids: List[Int]
 
-    def __init__(out self, workers: Int = 4, pipeline: Int = 2) raises:
+    def __init__(
+        out self, workers: Int = 4, pipeline: Int = 2, groups: String = ""
+    ) raises:
         """Starts this process in the role its environment names.
 
         Args:
-            workers: Workers to fork in local mode; ignored otherwise.
+            workers: Workers in no group to fork in local mode; ignored
+                otherwise.
             pipeline: Tasks in flight per worker, if this process runs a head.
+            groups: Workers in groups to fork as well in local mode, as
+                `"gpu=1,io=2"`; ignored otherwise.
         """
         Self._check_registry()
+        var names = List[String]()
+        var counts = List[Int]()
+        _parse_groups(groups, names, counts)
         if pipeline < 1:
             raise Error("pipeline must be at least 1")
         var role = getenv("DISTA_ROLE")
@@ -115,7 +154,12 @@ struct Runtime[*Ts: TaskLike](Movable):
         if head_addr != "":
             stream = connect_head(head_addr)
         else:
-            if workers < 1:
+            var total = workers
+            var local = Dict[String, Int]()
+            for k in range(len(names)):
+                total += counts[k]
+                local[names[k]] = counts[k]
+            if workers < 0 or total < 1:
                 raise Error("need at least one worker")
             var listener = Listener()
             var port = listener.port
@@ -128,7 +172,8 @@ struct Runtime[*Ts: TaskLike](Movable):
                         Self._registry_hash(),
                         pipeline,
                         True,
-                        local_workers=workers,
+                        local_workers=total,
+                        local_groups=local^,
                     )
                     head.run()
                 except e:
@@ -140,18 +185,29 @@ struct Runtime[*Ts: TaskLike](Movable):
                 var mine = listener^
                 mine.close()
             pids.append(pid)
+            # The workers in no group first, then each group's.
+            var group_of = List[String]()
             for _ in range(workers):
+                group_of.append(String())
+            for k in range(len(names)):
+                for _ in range(counts[k]):
+                    group_of.append(names[k])
+            for ref g in group_of:
                 pid = fork()
                 if pid == 0:
                     var code = 0
                     try:
+                        if g == "":
+                            _ = unsetenv("DISTA_GROUP")
+                        else:
+                            _ = setenv("DISTA_GROUP", g)
                         var s = Stream.connect(port)
                         send_auth(s)
                         Self._work(
                             s^,
                             "",
                             String("127.0.0.1:", port),
-                            sharing=workers,
+                            sharing=total,
                         )
                     except e:
                         print("dista worker:", e)
@@ -160,7 +216,12 @@ struct Runtime[*Ts: TaskLike](Movable):
                 pids.append(pid)
             stream = Stream.connect(port)
             send_auth(stream)
-        self._c = Client(stream^, head_addr, Self._registry_hash())
+        self._c = Client(
+            stream^,
+            head_addr,
+            Self._registry_hash(),
+            groups=Self._groups_frame(),
+        )
         self._pids = pids^
 
     def __deinit__(deinit self):
@@ -180,8 +241,29 @@ struct Runtime[*Ts: TaskLike](Movable):
         return fnv1a64(all)
 
     @staticmethod
+    def _groups_frame() -> List[UInt8]:
+        """The groups frame a driver sends after its welcome: each task with
+        a group, and its group. Empty, and never sent, if none has one."""
+        var ids = List[UInt64]()
+        var names = List[String]()
+        comptime for i in range(Self.Ts.length):
+            if Self.Ts[i].group_name() != "":
+                ids.append(Self.Ts[i].id())
+                names.append(String(Self.Ts[i].group_name()))
+        if len(ids) == 0:
+            return List[UInt8]()
+        return encode_groups(ids, names)
+
+    @staticmethod
     def _check_registry() raises:
-        """Raises if two registered tasks share a wire ID."""
+        """Raises if two registered tasks share a wire ID, or one names a
+        group that isn't a group's name."""
+        comptime for i in range(Self.Ts.length):
+            if Self.Ts[i].group_name() != "":
+                try:
+                    check_group(Self.Ts[i].group_name())
+                except e:
+                    raise Error(Self.Ts[i].name(), ": ", e)
         comptime for i in range(Self.Ts.length):
             comptime for j in range(i + 1, Self.Ts.length):
                 if Self.Ts[i].id() == Self.Ts[j].id():
@@ -296,7 +378,14 @@ struct Runtime[*Ts: TaskLike](Movable):
             Self._destroy,
             Self._save,
             Self._restore,
-        ](head^, Self._registry_hash(), head_addr, rejoin_at, sharing)
+        ](
+            head^,
+            Self._registry_hash(),
+            head_addr,
+            rejoin_at,
+            sharing,
+            Self._groups_frame(),
+        )
         while True:
             w.run()
             if rejoin_at == "" or w.stopped:

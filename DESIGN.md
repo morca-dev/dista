@@ -724,9 +724,18 @@ its grant), so the head only routes by a name.
 
 | # | PR | Gate | Size |
 |---|---|---|---|
-| 1 | **Groups for tasks**: `DISTA_GROUP` and the hello, `group=` on the task types, the groups frame, dispatch by group, local mode's `groups=`, the group in `dista status`. | `tests/test_groups.mojo`: of 200 tasks in two groups, each runs on a worker of its group (it returns its worker's group); tasks with no group never run on a grouped worker; a `TaskMany` and a stream keep to their group; a task of a group with no worker fails at once in local mode; a worker killed mid-run has its tasks run again inside the group. A program without groups sends the bytes it sent before. | ~600 |
+| 1 | **Groups for tasks**: `DISTA_GROUP` and the hello, `group=` on the task types, the groups frame, dispatch by group, local mode's `groups=`, the group in `dista status`. Done; see "PR 1 against the plan" below. | `tests/test_groups.mojo`: of 200 tasks in two groups, each runs on a worker of its group (it returns its worker's group); tasks with no group never run on a grouped worker; a `TaskMany` and a stream keep to their group; a task of a group with no worker fails at once in local mode; a worker killed mid-run has its tasks run again inside the group. A program without groups sends the bytes it sent before. | ~600 |
 | 2 | **Actors and failures**: placement by group, restore and move on a drain inside the group, the drain refusals, a head restart (workers rejoin with their group, the table is sent again), the fuzzers' share. | An actor with `group="gpu"` is built on the gpu worker with three others idle; with two gpu workers, a drained one's actor moves to the other; `tests/head_restart.sh` with a grouped task and actor. | ~400 |
 | 3 | **Demand per group**: `status --json`, `/metrics`, `demand.of`, `dista scale --group`. | `tests/autoscale.sh` with two groups: tasks of group `b` queued grow `b` alone, and it drains back alone. | ~400 |
+
+### PR 1 against the plan
+
+- **`group_name()`, not `group()`.** `Task[Int, Int, square, group="gpu"]` and `Actor[Model, String, load_model, group="gpu"]` compile as written (a defaulted `StaticString` parameter after the function), but Mojo refuses a member with a parameter's name, so `TaskLike`'s method is `group_name()`. `CtxTask` and `CtxMethod` take no group.
+- **The groups frame** is a count (u64), then per task its ID (u64), a length byte and the name. The head checks every name, as it does a hello's.
+- **Queues.** A task's queue was its program's; now it's its program's and its group's (`queue_key`: the registry hash for no group, else the hash mixed with the group's), and a worker takes from the queue of its program and group. Locality and `_wanted` (idle seconds) compare that key.
+- **Local mode** also fails a group's queued tasks once every forked worker of that group has gone, as it already failed every queued task once all had: `no worker of group gpu left`. A task with no group and no worker without one (`Runtime(workers=0, groups="gpu=1")`, which is allowed) fails with `no worker without a group`.
+- **Actors are still placed by program alone** until PR 2: an actor of no group may land on a grouped worker, and one of a group on any worker. `Actor` takes `group=`, and the registry check and the groups frame include it, but the head ignores it for actors.
+- **`dista status --json`** gives each worker's `"group"` ("" for none) now; the `groups` list is PR 3's.
 
 ### Defaults to confirm
 

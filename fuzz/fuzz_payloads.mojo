@@ -1,5 +1,5 @@
 """Fuzz: the structured payloads a worker parses from the head, task-inputs
-and locations.
+and locations, and the groups frame the head parses from a driver.
 
     pixi run -e fuzz fuzz-payloads
 """
@@ -9,6 +9,7 @@ from std.os import getenv
 from mozz import FuzzConfig, fuzz
 
 from dista.codec import put_scalar
+from dista.frame import encode_groups, parse_groups
 from dista.store import Location
 from dista.worker import parse_task_inputs
 
@@ -20,7 +21,13 @@ def target(data: List[UInt8]) raises:
         return
     var body = Span(data)[1:]
     try:
-        if data[0] % 2 == 0:
+        if data[0] % 3 == 2:
+            var table = parse_groups(body)
+            for entry in table.items():
+                var n = entry.value.byte_length()
+                if n < 1 or n > 32:
+                    raise Error("assertion failed: a bad group name passed")
+        elif data[0] % 3 == 0:
             var spec = parse_task_inputs(body)
             for ref inp in spec.inputs:
                 if inp.inline == Bool(inp.location):
@@ -61,6 +68,9 @@ def main() raises:
     spec.extend(loc.encode())
     seeds.append(spec^)
     # A stream's: the STREAM flag, its window, one input inline.
+    var groups: List[UInt8] = [2]
+    groups.extend(encode_groups([UInt64(7), UInt64(9)], ["gpu", "io-2"]))
+    seeds.append(groups^)
     var stream: List[UInt8] = [0, 8]
     put_scalar[DType.uint64](stream, 16)
     put_scalar[DType.uint64](stream, 1)

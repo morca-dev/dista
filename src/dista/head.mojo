@@ -88,6 +88,17 @@ calls there, so none runs twice. Without `DISTA_CHECKPOINT_URI` the
 checkpoint fails, and the actor restarts when its worker leaves, replaying
 its calls, as for one lost.
 
+A worker may be in a group (`DISTA_GROUP`, the end of its hello), and a
+task runs only on a worker of its own group: one with no group only on a
+worker with none. A driver whose tasks have groups sends a groups frame
+after its welcome, which the head keeps for it, and a task's group is looked
+up when it's queued: its queue is its program's and its group's, and a
+worker takes tasks only from its own program's and group's queue. Slots,
+capacity, placement by data location and retries all work within a group.
+A cluster keeps a task of a group with no worker queued; local mode, where
+nobody adds one, fails it at once, as it fails every queued task once all
+its workers have gone.
+
 An actor is placed on a worker that hosts no other and runs no stream, the
 one with the fewest tasks in flight, as soon as it's created; the worker builds it once those
 tasks finish. From then on the head sends that worker only the actor's calls,
@@ -123,6 +134,8 @@ from dista.codec import get_scalar, put_scalar
 from dista.conn import Conn
 from dista.frame import (
     message,
+    parse_groups,
+    KIND_GROUPS,
     ADDR_SIZE,
     KIND_ACTOR_CALL,
     KIND_ACTOR_CREATE,
@@ -191,6 +204,7 @@ from dista.metrics import (
 from dista.sizing import CAPACITY_ANNOUNCE
 from dista.store import Location
 from dista.stream import ITEMS_PER_STREAM
+from dista.task import MAX_GROUP, check_group, fnv1a64
 
 comptime DRIVER_SHIFT = 40
 """Object IDs carry their driver's number above this bit."""
@@ -218,6 +232,14 @@ def head_epoch() -> UInt64:
     var pid = UInt64(Int(external_call["getpid", c_int]()))
     var e = _mix(wall_ns() ^ _mix(pid ^ (UInt64(perf_counter_ns()) << 20)))
     return e if e != 0 else 1
+
+
+def queue_key(registry_hash: UInt64, group: StringSpan) -> UInt64:
+    """The queue a program's tasks of `group` wait in, and that its workers
+    of that group take from: the registry hash itself for no group."""
+    if group == "":
+        return registry_hash
+    return _mix(registry_hash ^ fnv1a64(group))
 
 
 def owner_of(object_id: UInt64) -> UInt64:
@@ -458,6 +480,21 @@ struct Head(Movable):
     var _admit: List[Int]
     """For a worker, the slots it has room to fill now: its slots, unless it
     said fewer (`KIND_CAPACITY`, from a worker sized by `auto`)."""
+    var _group: List[String]
+    """For a worker, its group (`DISTA_GROUP`, from its hello); "" for none.
+    """
+    var _wkey: List[UInt64]
+    """For a worker, the queue it takes tasks from (`queue_key`)."""
+    var _groups: Dict[UInt64, Dict[UInt64, String]]
+    """Each driver's groups frame, by number: task ID to group name. A
+    driver without one has every task in no group."""
+    var _key_group: Dict[UInt64, String]
+    """For each queue, the group its tasks are in."""
+    var _local_groups: Dict[String, Int]
+    """In local mode, how many workers the runtime forked in each group, ""
+    included; empty otherwise."""
+    var _lost_in: Dict[String, Int]
+    """In local mode, how many workers of each group have gone away."""
     var _driver_conn: Dict[UInt64, Int]
     var _next_driver: UInt64
     """The next driver number to try. It starts at a random place, so a head
@@ -642,6 +679,7 @@ struct Head(Movable):
         pipeline: Int,
         exit_when_idle: Bool,
         local_workers: Int = 0,
+        var local_groups: Dict[String, Int] = Dict[String, Int](),
     ):
         """A head serving `listener`.
 
@@ -651,6 +689,8 @@ struct Head(Movable):
             pipeline: Tasks in flight per worker.
             exit_when_idle: Return once the last driver leaves (local mode).
             local_workers: In local mode, how many workers were forked.
+            local_groups: In local mode, how many of those are in each
+                group; the rest are in none.
         """
         self._listener = listener^
         self._registry_hash = registry_hash
@@ -663,6 +703,17 @@ struct Head(Movable):
         self._inflight = List[List[UInt64]]()
         self._slots = List[Int]()
         self._admit = List[Int]()
+        self._group = List[String]()
+        self._wkey = List[UInt64]()
+        self._groups = Dict[UInt64, Dict[UInt64, String]]()
+        self._key_group = Dict[UInt64, String]()
+        self._lost_in = Dict[String, Int]()
+        if local_workers > 0:
+            var grouped = 0
+            for entry in local_groups.items():
+                grouped += entry.value
+            local_groups[""] = local_workers - grouped
+        self._local_groups = local_groups^
         self._driver_conn = Dict[UInt64, Int]()
         self._epoch = head_epoch()
         self._next_driver = (self._epoch >> 7) % (MAX_DRIVER - 1) + 1
@@ -1145,6 +1196,8 @@ struct Head(Movable):
             )
             if self._slots[i] != 1:
                 out += String("  slots ", self._slots[i])
+            if self._group[i] != "":
+                out += String("  group ", self._group[i])
             if self._hosting[i] != 0:
                 out += String("  actor ", self._hosting[i])
             if self._draining[i] != _DRAIN_NO:
@@ -1238,8 +1291,8 @@ struct Head(Movable):
         if len(self._inflight[i]) > 0 or self._hosting[i] != 0:
             return True
         try:
-            if self._hashes[i] in self._queues:
-                return len(self._queues[self._hashes[i]]) > 0
+            if self._wkey[i] in self._queues:
+                return len(self._queues[self._wkey[i]]) > 0
         except:
             pass
         return False
@@ -1353,6 +1406,9 @@ struct Head(Movable):
                 len(self._inflight[i]),
                 ',"slots":',
                 self._slots[i],
+                ',"group":"',
+                self._group[i],
+                '"',
                 ',"idle_seconds":',
                 self._idle_seconds(i, now),
                 ',"held_bytes":',
@@ -1383,6 +1439,8 @@ struct Head(Movable):
             self._inflight[i] = List[UInt64]()
             self._slots[i] = 1
             self._admit[i] = 1
+            self._group[i] = String()
+            self._wkey[i] = 0
             self._worker_addr[i] = List[UInt8]()
             self._node[i] = String()
             self._hosting[i] = 0
@@ -1399,6 +1457,8 @@ struct Head(Movable):
         self._inflight.append(List[UInt64]())
         self._slots.append(1)
         self._admit.append(1)
+        self._group.append(String())
+        self._wkey.append(0)
         self._worker_addr.append(List[UInt8]())
         self._node.append(String())
         self._hosting.append(0)
@@ -1534,6 +1594,14 @@ struct Head(Movable):
                     self._deliver(
                         obj, KIND_LOCATED, self._where.get(obj, List[UInt8]())
                     )
+            elif f.kind == KIND_GROUPS:
+                var table = parse_groups(f.payload)
+                var d = UInt64(0)
+                for entry in self._driver_conn.items():
+                    if entry.value == i:
+                        d = entry.key
+                if d != 0:
+                    self._groups[d] = table^
             elif f.kind == KIND_RESUMED:
                 var d = owner_of(f.object_id)
                 self._resumed[d] = True
@@ -2209,21 +2277,32 @@ struct Head(Movable):
             put_scalar[DType.uint64](body, self._epoch)
             self._conns[i].send(KIND_WELCOME, 0, 0, body)
         elif f.payload[0] == ROLE_WORKER:
-            if (
-                len(f.payload) != 9 + ADDR_SIZE
-                and len(f.payload) != 17 + ADDR_SIZE
-            ):
+            var n = len(f.payload)
+            if n != 9 + ADDR_SIZE and n < 17 + ADDR_SIZE:
                 raise Error("a worker's hello must carry its address")
             var slots = 1
-            if len(f.payload) == 17 + ADDR_SIZE:
-                # Its slots, after the address; a worker with one sends none.
+            var group = String()
+            if n >= 17 + ADDR_SIZE:
+                # Its slots, after the address; a worker with one and no
+                # group sends none.
                 var p = 9 + ADDR_SIZE
                 slots = Int(get_scalar[DType.uint64](f.payload, p))
                 if slots < 1 or slots > MAX_SLOTS:
                     raise Error("a worker's slots are out of range: ", slots)
+                if n > p:
+                    # Its group: a length byte and the name.
+                    var size = Int(f.payload[p])
+                    if size > MAX_GROUP or n != p + 1 + size:
+                        raise Error("a worker's group is malformed")
+                    group = String(
+                        from_utf8_lossy=f.payload[p + 1 : p + 1 + size]
+                    )
+                    check_group(group)
             self._roles[i] = ROLE_WORKER
             self._slots[i] = slots
             self._admit[i] = slots
+            self._wkey[i] = queue_key(hash, group)
+            self._group[i] = group^
             # This head reads `KIND_CAPACITY`: a free of object 0, which
             # names nothing, so a worker from before ignores it.
             self._conns[i].send(KIND_FREE, CAPACITY_ANNOUNCE, 0, List[UInt8]())
@@ -2546,6 +2625,7 @@ struct Head(Movable):
                     gone = entry.key
             if gone != 0:
                 _ = self._driver_conn.pop(gone, -1)
+                _ = self._groups.pop(gone, Dict[UInt64, String]())
                 # Its tasks that haven't run never will: nobody would read
                 # them. Those running finish, and their results are dropped.
                 self._purge(gone)
@@ -2570,6 +2650,8 @@ struct Head(Movable):
                 _ = self._warned_at.pop(gone, 0)
         elif role == ROLE_WORKER:
             self._workers_lost += 1
+            var g = self._group[i].copy()
+            self._lost_in[g] = self._lost_in.get(g, 0) + 1
             if self._draining[i] != _DRAIN_NO:
                 self._draining[i] = _DRAIN_NO
                 self._n_draining -= 1
@@ -2948,26 +3030,71 @@ struct Head(Movable):
         """Fails every queued task: in local mode, with every worker gone,
         nothing will run them, and a driver waiting on one would wait for
         ever."""
-        var queued = List[_Task]()
         var hashes = List[UInt64]()
         for h in self._queues.keys():
             hashes.append(h)
         for h in hashes:
-            try:
-                queued.extend(self._queues[h].take_all())
-            except:
-                pass
+            self._fail_queue(
+                h, String("no workers left: every local worker went away")
+            )
         self._queues = Dict[UInt64, _Queue]()
         self._queued_bytes = 0
+
+    def _fail_queue(mut self, h: UInt64, why: String):
+        """Fails every task queued in queue `h` with `why`."""
+        var queued: List[_Task]
+        try:
+            queued = self._queues[h].take_all()
+        except:
+            return
         for ref t in queued:
+            self._queued_bytes -= len(t.args)
             if self._cancelled.pop(t.object_id, False):
                 continue  # failed already
             var parts = self._many.get(t.object_id, 1)
             for k in range(parts):
-                self._fail(
-                    t.object_id + UInt64(k),
-                    String("no workers left: every local worker went away"),
+                self._fail(t.object_id + UInt64(k), why.copy())
+
+    def _fail_unserved(mut self):
+        """In local mode, fails the tasks queued for a group none of the
+        forked workers is in, or whose every worker has gone: nobody will
+        add one."""
+        var dead = List[UInt64]()
+        for entry in self._queues.items():
+            if len(entry.value) == 0:
+                continue
+            var g = self._key_group.get(entry.key, String())
+            if self._lost_in.get(g, 0) >= self._local_groups.get(g, 0):
+                dead.append(entry.key)
+        for h in dead:
+            var g = self._key_group.get(h, String())
+            var why: String
+            if self._local_groups.get(g, 0) == 0:
+                if g == "":
+                    why = String(
+                        "no worker without a group: every local worker is in"
+                        " one (Runtime(workers=...))"
+                    )
+                else:
+                    why = String(
+                        "no worker of group ",
+                        g,
+                        ': local mode started none (Runtime(groups="',
+                        g,
+                        '=1"))',
+                    )
+            elif g == "":
+                why = String(
+                    "no workers left without a group: every local worker"
+                    " without one went away"
                 )
+            else:
+                why = String(
+                    "no worker of group ",
+                    g,
+                    " left: every local worker of it went away",
+                )
+            self._fail_queue(h, why)
 
     def _why_not_retry(self, obj: UInt64) -> String:
         """Why the task making `obj`, whose worker went away, can't run
@@ -3190,6 +3317,16 @@ struct Head(Movable):
             n += len(entry.value)
         return n
 
+    def _group_of(self, t: _Task) -> String:
+        """The group task `t` runs in, from its driver's groups frame."""
+        var d = owner_of(t.object_id)
+        if d not in self._groups:
+            return String()
+        try:
+            return self._groups[d].get(t.task_id, String())
+        except:
+            return String()
+
     def _hash_of(self, object_id: UInt64) -> UInt64:
         """The registry hash of the program that made `object_id`."""
         return self._driver_hash.get(owner_of(object_id), self._registry_hash)
@@ -3259,7 +3396,7 @@ struct Head(Movable):
                 j != i
                 and self._roles[j] == ROLE_WORKER
                 and self._hosting[j] == 0
-                and self._hashes[j] == self._hashes[i]
+                and self._wkey[j] == self._wkey[i]
                 and self._draining[j] == _DRAIN_NO
                 and self._node[j] == node
                 and len(self._inflight[j]) <= depth
@@ -3319,9 +3456,11 @@ struct Head(Movable):
 
     def _enqueue(mut self, var t: _Task):
         self._queued_bytes += len(t.args)
-        var h = self._hash_of(t.object_id)
+        var group = self._group_of(t)
+        var h = queue_key(self._hash_of(t.object_id), group)
         if h not in self._queues:
             self._queues[h] = _Queue()
+            self._key_group[h] = group^
         try:
             self._queues[h].tasks.append(t^)
         except:
@@ -3340,6 +3479,8 @@ struct Head(Movable):
         ):
             self._fail_queued()
             return
+        if self._local_workers > 0:
+            self._fail_unserved()
         for depth in range(self._rounds()):
             for i in self._order(depth):
                 if self._roles[i] != ROLE_WORKER or self._hosting[i] != 0:
@@ -3350,7 +3491,7 @@ struct Head(Movable):
                     continue
                 if depth >= self._capacity(i):
                     continue
-                var h = self._hashes[i]
+                var h = self._wkey[i]
                 if h not in self._queues:
                     continue
                 var t: _Task

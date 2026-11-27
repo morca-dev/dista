@@ -31,6 +31,7 @@ from dista.frame import (
     KIND_COVERED,
     KIND_ERROR,
     KIND_FETCH,
+    KIND_GROUPS,
     KIND_HELLO,
     KIND_LOCATED,
     KIND_RELEASE,
@@ -557,6 +558,9 @@ struct Client(Movable):
     their answers come, the tasks run again on an input nobody has."""
     var _releases: List[UInt64]
     """Releases due, to send with the next frame (`_flush_releases`)."""
+    var _groups: List[UInt8]
+    """The registry's groups frame, sent after each welcome; empty, and not
+    sent, for a registry with no group."""
 
     def __init__(
         out self,
@@ -564,6 +568,7 @@ struct Client(Movable):
         head_addr: String,
         registry_hash: UInt64,
         role: UInt8 = ROLE_DRIVER,
+        var groups: List[UInt8] = List[UInt8](),
     ) raises:
         """Says hello to the head on `head` and becomes a driver.
 
@@ -572,8 +577,12 @@ struct Client(Movable):
             head_addr: Where to reconnect if the head restarts, or "".
             registry_hash: The registry every peer must share.
             role: `ROLE_DRIVER`, or `ROLE_CLIENT` for one inside a worker.
+            groups: The registry's groups frame (`encode_groups`), or empty.
         """
         var w = _welcome(head, role, registry_hash)
+        if len(groups) > 0:
+            write_frame(head, KIND_GROUPS, 0, 0, groups)
+        self._groups = groups^
         self._driver = w[0]
         self._epoch = w[1]
         self._refusal = String()
@@ -1122,6 +1131,8 @@ struct Client(Movable):
             raise Error(self._refusal)
         if not f or f.value().kind != KIND_WELCOME:
             raise Error("the restarted head didn't welcome this driver back")
+        if len(self._groups) > 0:
+            write_frame(self._head, KIND_GROUPS, 0, 0, self._groups)
         # Oldest first, so every task's inputs are back before it is, and
         # every actor before its calls.
         var n = 0
@@ -1613,18 +1624,25 @@ struct TaskContext(Movable):
     var _connect_to: String
     var _resume_at: String
     var _hash: UInt64
+    var _groups: List[UInt8]
+    """The registry's groups frame, which its client sends too."""
     var _client: Optional[Client]
     var stream: StreamSink
     """Where the running stream's items go; the default raises."""
 
     def __init__(
-        out self, connect_to: String, resume_at: String, registry_hash: UInt64
+        out self,
+        connect_to: String,
+        resume_at: String,
+        registry_hash: UInt64,
+        var groups: List[UInt8] = List[UInt8](),
     ):
         """`connect_to` is the head's `host:port`; `resume_at` the same in a
         cluster, or "" in local mode, where the head doesn't come back."""
         self._connect_to = connect_to
         self._resume_at = resume_at
         self._hash = registry_hash
+        self._groups = groups^
         self._client = None
         self.stream = StreamSink()
 
@@ -1637,6 +1655,7 @@ struct TaskContext(Movable):
                 self._resume_at,
                 self._hash,
                 ROLE_CLIENT,
+                self._groups.copy(),
             )
         return self._client.value()
 

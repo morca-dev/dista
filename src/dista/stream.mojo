@@ -146,6 +146,7 @@ struct TaskStream[
     A_: Movable & Deinitable,
     X: Movable & Deinitable,
     f: def(A_, mut Emit[X]) thin raises,
+    group: StaticString = "",
 ](StreamLike):
     """A remote function that hands over its results one at a time as it
     makes them: `rt.stream[T](a)` returns a `StreamRef[X]`, and `rt.next`
@@ -163,6 +164,10 @@ struct TaskStream[
     @staticmethod
     def id() -> UInt64:
         return fnv1a64(Self.name())
+
+    @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
 
     @staticmethod
     def is_stream() -> Bool:

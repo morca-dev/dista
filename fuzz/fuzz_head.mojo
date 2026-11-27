@@ -2,7 +2,10 @@
 
 Each input is a fresh head with one driver and one worker connected over
 socket pairs, both past their hello. The rest of the input is a script of
-frames, each sent by one of the two, or a disconnect: random kinds, object
+frames, each sent by one of the two, or a disconnect. When the first byte
+has bit 2 set, the worker is in group `g` and the driver's groups frame puts
+tasks 1 and 2 in it; the script's random kinds include groups frames too.
+The frames are random kinds, object
 IDs from a small range (so they collide with submitted tasks), random
 payloads. A frame the head rejects drops that peer, as the real loop does.
 
@@ -22,15 +25,15 @@ from mozz import FuzzConfig, fuzz
 from dista.codec import put_scalar
 from dista.conn import Conn
 from dista.frame import (
+    KIND_GROUPS,
     KIND_HELLO,
-    KIND_STREAM_STOP,
     ROLE_DRIVER,
-    ROLE_WORKER,
     Frame,
-    encode_addr,
+    encode_groups,
 )
 from dista.head import DRIVER_SHIFT, Head
 from dista.socket import Listener, Stream, stream_pair
+from dista.worker import worker_hello
 
 comptime HASH: UInt64 = 0x5EED
 comptime DRIVER = 0
@@ -86,10 +89,23 @@ def target(data: List[UInt8]) raises:
     var hello: List[UInt8] = [ROLE_DRIVER]
     put_scalar[DType.uint64](hello, HASH)
     head._handle(conn[DRIVER], Frame(KIND_HELLO, 0, 0, hello^))
-    hello = [ROLE_WORKER]
-    put_scalar[DType.uint64](hello, HASH)
-    hello.extend(encode_addr([127, 0, 0, 1], 7000))
+    var group = String()
+    if len(data) > 0 and (data[0] & 4) != 0:
+        group = "g"
+        var table = encode_groups([UInt64(1), UInt64(2)], ["g", "g"])
+        head._handle(conn[DRIVER], Frame(KIND_GROUPS, 0, 0, table^))
+    hello = worker_hello(HASH, [127, 0, 0, 1], 7000, 1, group)
     head._handle(conn[WORKER], Frame(KIND_HELLO, 0, 0, hello^))
+    # A worker's hello with the input's first bytes after its address, where
+    # its slots and group go: it parses or raises, and the worker then goes.
+    var extra = _connect(head, peers)
+    var long = worker_hello(HASH, [127, 0, 0, 1], 7001, 1)
+    long.extend(Span(data)[: min(len(data), 48)])
+    try:
+        head._handle(extra, Frame(KIND_HELLO, 0, 0, long^))
+    except:
+        pass
+    head._drop(extra)
     var alive: List[Bool] = [True, True]
 
     # Each step: who (bit 0) and whether it hangs up (bit 1), kind, object,
@@ -98,7 +114,7 @@ def target(data: List[UInt8]) raises:
     while pos + 5 <= len(data):
         var who = Int(data[pos] & 1)
         var hang_up = (data[pos] & 2) != 0
-        var kind = data[pos + 1] % (KIND_STREAM_STOP + 1)
+        var kind = data[pos + 1] % (KIND_GROUPS + 1)
         var obj = (UInt64(1) << DRIVER_SHIFT) | UInt64(data[pos + 2] % 16)
         # A task type, or with the top bit set an object, as a stream's
         # item frames carry their stream's ID.
