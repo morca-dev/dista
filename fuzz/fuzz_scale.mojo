@@ -3,6 +3,7 @@ read, never crash; and `decide`, on any demand and policy the bytes make,
 must stay inside the policy's range: it never starts more than `max_step`,
 never asks past `max_workers`, never drains below `min_workers`, a worker
 twice, a draining one, a busy one, or an actor's without a checkpoint store.
+A decision for one group (`Demand.of`) never names another group's worker.
 
     pixi run -e fuzz fuzz-scale
 """
@@ -11,7 +12,12 @@ from std.os import getenv
 
 from mozz import FuzzConfig, fuzz
 
-from dista.scale import Demand, Policy, WorkerDemand, decide
+from dista.scale import Demand, GroupDemand, Policy, WorkerDemand, decide
+
+
+def _group(k: Int) -> String:
+    """One of three groups, the one with no name included."""
+    return String("") if k % 3 == 0 else (String("a") if k % 3 == 1 else "b")
 
 
 def _byte(data: List[UInt8], mut at: Int) -> Int:
@@ -50,6 +56,7 @@ def _check(data: List[UInt8]) raises:
                 (flags >> 2) % 2 * 100,
                 UInt64((flags >> 3) % 2 * (i + 1)),
                 (flags >> 4) % 4 == 0,
+                _group(flags >> 6),
             )
         )
     var pending = _byte(data, at) % 8
@@ -81,6 +88,33 @@ def _check(data: List[UInt8]) raises:
                 raise Error("assertion failed: drained an actor's worker")
         if not found:
             raise Error("assertion failed: drained an unknown worker")
+
+    # One group's share: its decision drains only its own workers.
+    for k in range(3):
+        d.groups.append(
+            GroupDemand(
+                _group(k),
+                0,
+                0,
+                _byte(data, at) % 30,
+                _byte(data, at) % 5,
+                _byte(data, at) % 9,
+                _byte(data, at) % 2,
+            )
+        )
+    d.has_groups = _byte(data, at) % 4 != 0
+    var g = _group(_byte(data, at))
+    var one = d.of(g)
+    got = decide(one, policy, now, pending, since)
+    for a in got.drain:
+        var mine = False
+        for w in d.workers:
+            if w.address == a and w.group == g:
+                mine = True
+        if not mine:
+            raise Error("assertion failed: drained ", a, " outside group ", g)
+    if got.start > policy.max_step:
+        raise Error("assertion failed: started ", got.start, " in a group")
 
 
 def target(data: List[UInt8]) raises:

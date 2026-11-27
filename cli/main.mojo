@@ -3,7 +3,7 @@
     dista head [--port 6390] [--pipeline 2]
     dista status [--json] [--head host:port]
     dista drain WORKER [--head host:port]
-    dista scale --once [--min 1] [--max 4] [--pending 0] [--short-since 0] ...
+    dista scale --once [--group NAME] [--min 1] [--max 4] [--pending 0] ...
     dista timeline -o trace.json [--head host:port]
     dista stop [--head host:port]
 
@@ -14,8 +14,10 @@ only to workers built from the same one. `status`, `drain`, `timeline` and
 autoscaler; `drain` takes a worker's address as `status` shows it. `scale
 --once` reads the demand and prints `dista.scale.decide`'s decision, a line
 each: `want N`, `start N`, `drain ADDRESS` per worker to drain, and
-`short_since T` to pass back next time; a provider loop runs it. Their head
-is `--head`, else `DISTA_HEAD`, else `localhost:6390`.
+`short_since T` to pass back next time; a provider loop runs it. With
+`--group` it decides for that worker group alone, from its own workers and
+tasks, so a provider runs it once per group. Their head is `--head`, else
+`DISTA_HEAD`, else `localhost:6390`.
 
 It depends on dista's core alone, so it's built and released on its own,
 and the program's own binary stays the driver and the worker.
@@ -36,7 +38,7 @@ comptime USAGE = """usage:
   dista drain WORKER [--head host:port]     drain the worker at ip:port, as SIGTERM would
   dista scale --once [--head host:port]     what an autoscaler should do now, from the demand:
       [--min 1] [--max 4] [--per 0] [--up-after 5] [--idle 60] [--step 4]
-      [--pending 0] [--short-since 0]
+      [--pending 0] [--short-since 0] [--group NAME]
   dista timeline -o FILE [--head host:port] every driver's finished tasks, as a Chrome trace
   dista stop [--head host:port]             shut the head and its workers down"""
 
@@ -56,6 +58,7 @@ def main() raises:
     var policy = Policy()
     var pending = 0
     var short_since = Float64(0)
+    var group = Optional[String]()
     var i = 2
     if cmd == "drain" and i < len(args) and not String(args[i]).startswith("-"):
         worker = String(args[i])
@@ -94,6 +97,8 @@ def main() raises:
             pending = Int(v)
         elif a == "--short-since":
             short_since = Float64(v)
+        elif a == "--group":
+            group = v
         else:
             print("dista: unknown option ", a, "\n", USAGE, sep="")
             exit_now(2)
@@ -131,6 +136,8 @@ def main() raises:
         )
         var o = Observer(head)
         var d = Demand.parse(o.status_json())
+        if group:
+            d = d.of(group.value())
         var now = Float64(wall_ns()) / 1e9
         print(decide(d, policy, now, pending, short_since), end="")
     elif cmd == "timeline":

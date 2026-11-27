@@ -726,7 +726,7 @@ its grant), so the head only routes by a name.
 |---|---|---|---|
 | 1 | **Groups for tasks**: `DISTA_GROUP` and the hello, `group=` on the task types, the groups frame, dispatch by group, local mode's `groups=`, the group in `dista status`. Done; see "PR 1 against the plan" below. | `tests/test_groups.mojo`: of 200 tasks in two groups, each runs on a worker of its group (it returns its worker's group); tasks with no group never run on a grouped worker; a `TaskMany` and a stream keep to their group; a task of a group with no worker fails at once in local mode; a worker killed mid-run has its tasks run again inside the group. A program without groups sends the bytes it sent before. | ~600 |
 | 2 | **Actors and failures**: placement by group, restore and move on a drain inside the group, the drain refusals, a head restart (workers rejoin with their group, the table is sent again), the fuzzers' share. Done; see "PR 2 against the plan" below. | An actor with `group="gpu"` is built on the gpu worker with three others idle; with two gpu workers, a drained one's actor moves to the other; `tests/head_restart.sh` with a grouped task and actor. | ~400 |
-| 3 | **Demand per group**: `status --json`, `/metrics`, `demand.of`, `dista scale --group`. | `tests/autoscale.sh` with two groups: tasks of group `b` queued grow `b` alone, and it drains back alone. | ~400 |
+| 3 | **Demand per group**: `status --json`, `/metrics`, `demand.of`, `dista scale --group`. Done; see "PR 3 against the plan" below. | `tests/autoscale.sh` with two groups: tasks of group `b` queued grow `b` alone, and it drains back alone. | ~400 |
 
 ### PR 1 against the plan
 
@@ -735,7 +735,7 @@ its grant), so the head only routes by a name.
 - **Queues.** A task's queue was its program's; now it's its program's and its group's (`queue_key`: the registry hash for no group, else the hash mixed with the group's), and a worker takes from the queue of its program and group. Locality and `_wanted` (idle seconds) compare that key.
 - **Local mode** also fails a group's queued tasks once every forked worker of that group has gone, as it already failed every queued task once all had: `no worker of group gpu left`. A task with no group and no worker without one (`Runtime(workers=0, groups="gpu=1")`, which is allowed) fails with `no worker without a group`.
 - **Actors were still placed by program alone**, with `group=` in the registry check and the groups frame but ignored by the head; PR 2 places them by it.
-- **`dista status --json`** gives each worker's `"group"` ("" for none) now; the `groups` list is PR 3's.
+- **`dista status --json`** gives each worker's `"group"` ("" for none) now; the `groups` list is PR 3's (done).
 
 ### PR 2 against the plan
 
@@ -744,6 +744,16 @@ its grant), so the head only routes by a name.
 - **The drain refusal** counts the group's tasks queued, waiting for inputs and running, as the refusal for the last worker counted all of them. The message names the group (`the last worker of group gpu`), or says `the last worker without a group` when grouped workers remain; a program with no groups gets the message it got before.
 - **The last worker of a group hosting an actor** drains, as the last worker hosting an actor did before: an actor never held a drain back. The actor moves through its checkpoint and, with no worker of its group left, waits, its calls held, until one joins and it's restored there. Without a checkpoint store it restarts from its constructor when one joins, replaying its calls. Refusing would keep an idle pool from shrinking to zero; an autoscaler already drains an actor's worker only with a checkpoint store (`dista.scale`).
 - **Tests.** `tests/test_groups.mojo` checks placement with three workers of no group idle (and that an actor of no group waits rather than take a free gpu worker), the move and the restore on two gpu workers beside three of none (the restore from an explicit checkpoint, so it can't race the kill), local mode's failure, a `CtxTask` submitting a grouped task through its client, and the refusals. `tests/head_restart.sh` adds two gpu workers, 100 gpu tasks and a gpu actor with 200 calls, each raising off a gpu worker; both actors must be restored from checkpoints. `fuzz_head` puts task 3 in a group no worker is in and checks every placed actor is on a worker of its group.
+
+### PR 3 against the plan
+
+- **`groups` in `status --json`** is a list of objects with `group` (the name, "" for none), `workers`, `slots`, `tasks_ready`, `tasks_waiting`, `tasks_running` and `actors_waiting`, sorted by name. A group is listed while it has a worker, a task or an actor waiting, so one with tasks and no workers shows, and one that's done and drained goes. `tasks_waiting` (tasks waiting for inputs) is there too: the head knows each waiting task's group.
+- **A group's running count is its workers'**: the tasks and calls in flight on them, so an actor's calls count in the actor's group, though a method has no group of its own.
+- **The gauges have their own names**, `dista_group_workers`, `dista_group_slots`, `dista_group_tasks_ready`, `dista_group_tasks_waiting`, `dista_group_tasks_running` and `dista_group_actors_waiting`, each with a `group` label. Labelled series under the totals' names (`dista_tasks_ready{group="b"}` beside `dista_tasks_ready`) would make a sum over that name count every task twice, and a query that reads one series, an HPA's, find several.
+- **The text status** adds a `groups:` section, a line per group, only once a group has a name.
+- **`Demand.of`** keeps the pipeline and the checkpoint flag. From a status without `groups` (a head before them), the group with no name is the whole demand and any other is empty. `WorkerDemand` gains `group`, defaulted, so its six-argument constructor still works.
+- **`tests/autoscale.sh groups`** (`pixi run test-autoscale-groups`) is the two-group scenario; the script without an argument runs the old one unchanged. Group `a` (min 1, max 3) runs 16 half-second tasks one at a time and its one worker is started by hand, so the counts can be checked with a's task running and b's 60 queued; group `b` (min 0, max 4) gets 60 at once. It checks `status --json`, the text status and `/metrics` before b has a worker, that b grows to 4 and drains to 0 while a stays at exactly 1, every result, and no retry or failure.
+- **`tests/cli.sh` hung** before this PR, since the restart driver it runs got a stream (streamed results, PR 3) and gpu tasks (PR 2): with no restart coming the stream ran for ever, and no worker was in group `gpu`. The driver now cancels its stream when `RESTART_GATE` isn't set, and cli.sh starts two gpu workers and a third without a group, and expects the gpu results.
 
 ### Defaults to confirm
 

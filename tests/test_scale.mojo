@@ -169,6 +169,89 @@ def test_parse_head_json() raises:
     assert_equal(len(empty.workers), 0)
 
 
+comptime _TWO_GROUPS = (
+    '{"tasks_ready":40,"tasks_waiting":2,"tasks_running":3,'
+    '"actors_waiting":1,"pipeline":2,"checkpoints":false,"workers":['
+    '{"address":"h:1","running":1,"idle_seconds":0,"held_bytes":0,'
+    '"actor":0,"draining":false,"group":"a"},'
+    '{"address":"h:2","running":0,"idle_seconds":90,"held_bytes":0,'
+    '"actor":0,"draining":false,"group":"a"},'
+    '{"address":"h:3","running":2,"idle_seconds":0,"held_bytes":0,'
+    '"actor":0,"draining":false,"group":""}],"groups":['
+    '{"group":"","workers":1,"slots":1,"tasks_ready":0,"tasks_waiting":2,'
+    '"tasks_running":2,"actors_waiting":0},'
+    '{"group":"a","workers":2,"slots":2,"tasks_ready":0,"tasks_waiting":0,'
+    '"tasks_running":1,"actors_waiting":0},'
+    '{"group":"b","workers":0,"slots":0,"tasks_ready":40,'
+    '"tasks_waiting":0,"tasks_running":0,"actors_waiting":1,"later":[1]}]}'
+)
+
+
+def test_of_two_groups() raises:
+    var d = Demand.parse(_TWO_GROUPS)
+    assert_equal(len(d.groups), 3)
+    assert_equal(d.groups[2].group, "b")
+    assert_equal(d.workers[0].group, "a")
+    var a = d.of("a")
+    assert_equal(len(a.workers), 2)
+    assert_equal(a.tasks_ready, 0)
+    assert_equal(a.tasks_running, 1)
+    assert_equal(a.pipeline, 2)
+    var none = d.of("")
+    assert_equal(len(none.workers), 1)
+    assert_equal(none.workers[0].address, "h:3")
+    assert_equal(none.tasks_waiting, 2)
+    assert_equal(none.tasks_running, 2)
+    # b's burst grows b, and leaves a alone: a's idle worker drains, the
+    # busy one stays.
+    var policy = Policy(min_workers=0, max_workers=6, idle_before_down=60)
+    var got = decide(a, policy, now=100)
+    assert_equal(got.start, 0)
+    assert_equal(len(got.drain), 1)
+    assert_equal(got.drain[0], "h:2")
+    got = decide(none, policy, now=100)
+    assert_equal(got.start, 0)
+    assert_equal(len(got.drain), 0)
+
+
+def test_of_group_with_tasks_and_no_workers() raises:
+    var b = Demand.parse(_TWO_GROUPS).of("b")
+    assert_equal(len(b.workers), 0)
+    assert_equal(b.tasks_ready, 40)
+    assert_equal(b.actors_waiting, 1)
+    # No worker of b at all: it starts at once, up to the step.
+    var got = decide(b, Policy(min_workers=0, max_workers=6), now=5)
+    assert_equal(got.want, 6)
+    assert_equal(got.start, 4)
+    # A group no one has heard of: nothing to do.
+    var c = Demand.parse(_TWO_GROUPS).of("c")
+    assert_equal(len(c.workers), 0)
+    assert_equal(c.tasks_ready + c.tasks_running + c.actors_waiting, 0)
+    got = decide(c, Policy(min_workers=0, max_workers=6), now=5)
+    assert_equal(got.start, 0)
+
+
+def test_of_status_before_groups() raises:
+    # A head before groups: no `groups` list, no worker's `group`.
+    var d = Demand.parse(
+        String(
+            '{"tasks_ready":5,"tasks_waiting":1,"tasks_running":2,',
+            '"actors_waiting":0,"pipeline":2,"workers":[{"address":"h:1",',
+            '"running":2,"idle_seconds":0,"held_bytes":0,"actor":0,',
+            '"draining":false}]}',
+        )
+    )
+    assert_true(not d.has_groups)
+    var all = d.of("")
+    assert_equal(len(all.workers), 1)
+    assert_equal(all.tasks_ready, 5)
+    assert_equal(all.tasks_waiting, 1)
+    assert_equal(all.tasks_running, 2)
+    var gpu = d.of("gpu")
+    assert_equal(len(gpu.workers), 0)
+    assert_equal(gpu.tasks_ready, 0)
+
+
 def test_simulated_burst_grows_and_shrinks() raises:
     """A job of 200 tasks of 2 s each, a tick a second: workers join 3 s
     after they're started and each runs 2 tasks at once. It must reach
