@@ -97,6 +97,7 @@ from dista.frame import (
     GATHER,
     WITH_VALUE,
     MANY,
+    STREAM,
     ROLE_WORKER,
     MAX_PAYLOAD,
     Frame,
@@ -213,6 +214,8 @@ struct TaskInputs(Movable):
     var inputs: List[InputSpec]
     var value: List[UInt8]
     """A `TaskWith`'s value, which goes before the inputs; or empty."""
+    var window: Int
+    """A `TaskStream`'s window; -1 for any other task."""
 
 
 def parse_task_inputs(payload: Span[UInt8, _]) raises -> TaskInputs:
@@ -227,6 +230,13 @@ def parse_task_inputs(payload: Span[UInt8, _]) raises -> TaskInputs:
         many = Int(get_scalar[DType.uint64](payload, pos))
         if many < 1 or many > 1 << 20:
             raise Error("bad task-inputs result count ", many)
+    var window = -1
+    if flags & STREAM:
+        if flags & MANY or len(payload) - pos < 16:
+            raise Error("bad task-inputs for a stream")
+        window = Int(get_scalar[DType.uint64](payload, pos))
+        if window < 0:
+            raise Error("bad task-inputs stream window ", window)
     var n = Int(get_scalar[DType.uint64](payload, pos))
     if n < 0 or n > len(payload):
         raise Error("bad task-inputs count ", n)
@@ -263,7 +273,7 @@ def parse_task_inputs(payload: Span[UInt8, _]) raises -> TaskInputs:
         value = List[UInt8](payload[pos:])
     elif pos != len(payload):
         raise Error("task-inputs with ", len(payload) - pos, " bytes left over")
-    return TaskInputs(many, gather, inputs^, value^)
+    return TaskInputs(many, gather, inputs^, value^, window)
 
 
 struct _Input(Movable):
@@ -338,6 +348,8 @@ struct _Parked(Movable):
     var arrived: UInt64
     var many: Int
     """A `TaskMany`'s number of results; 0 for any other task."""
+    var window: Int
+    """A `TaskStream`'s window; -1 for any other task."""
 
     def __init__(
         out self,
@@ -347,10 +359,12 @@ struct _Parked(Movable):
         var inputs: List[_Input],
         var value: List[UInt8],
         many: Int = 0,
+        window: Int = -1,
     ):
         self.object_id = object_id
         self.task_id = task_id
         self.many = many
+        self.window = window
         self.gather = gather
         self.inputs = inputs^
         self.value = value^
@@ -902,6 +916,7 @@ struct Worker[
             var spec = parse_task_inputs(f.payload)
             var gather = spec.gather
             var many = spec.many
+            var window = spec.window
             var inputs = List[_Input](capacity=len(spec.inputs))
             for ref inp in spec.inputs:
                 var obj = inp.object_id
@@ -936,6 +951,7 @@ struct Worker[
                     inputs^,
                     spec.value.copy(),
                     many,
+                    window,
                 )
             )
         elif f.kind == KIND_STOP:
@@ -991,7 +1007,8 @@ struct Worker[
     def _stop_stream(mut self, stream: UInt64):
         """The head says nobody reads stream `stream`: its next `put`, or the
         one waiting, raises "cancelled". One still in `_ready` starts
-        halted; one not here is done already."""
+        halted, as does one parked for its inputs; one not here is done
+        already."""
         if stream == self._stream and stream != 0:
             self._halted = True
         elif stream in self._stream_slots:
@@ -1001,6 +1018,13 @@ struct Worker[
                 if (
                     self._ready[k].object_id == stream
                     and self._ready[k].kind == KIND_TASK_STREAM
+                ):
+                    self._stops[stream] = True
+            # Or parked, on another task's result, waiting for its inputs.
+            for k in range(len(self._parked)):
+                if (
+                    self._parked[k].object_id == stream
+                    and self._parked[k].window >= 0
                 ):
                     self._stops[stream] = True
 
@@ -1258,6 +1282,7 @@ struct Worker[
                     complete = False
             if failed:
                 var first = p.object_id
+                _ = self._stops.pop(first, False)
                 var parts = max(p.many, 1)
                 for k in range(parts):
                     self._report_error(
@@ -1270,6 +1295,8 @@ struct Worker[
                 self._parked.append(keep^)
                 continue
             var kind = KIND_TASK_MANY if p.many > 0 else KIND_TASK
+            if p.window >= 0:
+                kind = KIND_TASK_STREAM
             var whole = _Parked(0, 0, False, List[_Input](), List[UInt8]())
             swap(whole, p)
             var obj = whole.object_id
@@ -1311,6 +1338,7 @@ struct Worker[
         var obj = p.inputs[0].object_id if len(p.inputs) == 1 else 0
         if (
             p.many == 0
+            and p.window < 0
             and not p.gather
             and len(p.value) == 0
             and len(p.inputs) == 1
@@ -1321,7 +1349,7 @@ struct Worker[
             # The task's one input, fetched for it alone: its arguments.
             _ = self._fetched.pop(obj, False)
             return self._objects.pop(obj)
-        var size = len(p.value) + 16
+        var size = len(p.value) + 24
         for _k in range(len(p.inputs)):
             ref inp = p.inputs[_k]
             if inp.have:
@@ -1334,6 +1362,9 @@ struct Worker[
         # A `TaskMany` runs on its number of results, then the input.
         if p.many > 0:
             put_scalar[DType.uint64](args, UInt64(p.many))
+        if p.window >= 0:
+            # A `TaskStream` runs on its window, then the input.
+            put_scalar[DType.uint64](args, UInt64(p.window))
         args.extend(Span(p.value))
         if p.gather:
             put_scalar[DType.int64](args, Int64(len(p.inputs)))

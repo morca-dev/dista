@@ -42,7 +42,9 @@ this doesn't deadlock it.
 
 Every object is reference counted: its driver holds it until it releases it
 (or disconnects), and each submitted task taking it as input holds it until
-that task settles. At zero the head forgets the object and tells the worker
+that task settles. A driver releases an object only once the tasks it
+submitted on it have settled on its side, so a head that restarts before
+their answers arrive still has the input when they run again. At zero the head forgets the object and tells the worker
 holding it, if one does, to delete it. An object released before its task
 finishes is freed when the task settles.
 
@@ -67,7 +69,11 @@ if none of its items was answered yet; otherwise its end fails. The driver's
 credits, how many items it has taken, go on to the stream's worker, whose
 `put` waits for them once the window is full. When the driver cancels the
 stream, releases it before it ended, or leaves, the head sends the worker a
-stream-stop, and drops whatever the stream answers after.
+stream-stop, and drops whatever the stream answers after. A stream on other
+results is a task-after with the `STREAM` flag, sent to its worker as a
+task-stream, or as task-inputs with the flag. A restarted head knows no
+stream: its driver fails the ones that hadn't ended and doesn't send them
+again, and their items it answers are dropped.
 
 A worker told to stop drains (see `worker.mojo`). The head sends it no more
 tasks and has the other workers adopt every result it holds: each fetches
@@ -82,8 +88,8 @@ calls there, so none runs twice. Without `DISTA_CHECKPOINT_URI` the
 checkpoint fails, and the actor restarts when its worker leaves, replaying
 its calls, as for one lost.
 
-An actor is placed on a worker that hosts no other, the one with the fewest
-tasks in flight, as soon as it's created; the worker builds it once those
+An actor is placed on a worker that hosts no other and runs no stream, the
+one with the fewest tasks in flight, as soon as it's created; the worker builds it once those
 tasks finish. From then on the head sends that worker only the actor's calls,
 each as it arrives, so they run in order. An actor created when every worker
 hosts one waits for a worker to join or an actor to be killed. Killing an
@@ -156,6 +162,7 @@ from dista.frame import (
     GATHER,
     WITH_VALUE,
     MANY,
+    STREAM,
     ROLE_CLIENT,
     ROLE_DRIVER,
     ROLE_OBSERVER,
@@ -251,6 +258,9 @@ struct _Task(Copyable, Movable):
     worker there takes first; "" for none."""
     var many: Int
     """A waiting `TaskMany`'s number of results; 0 for any other task."""
+    var window: Int
+    """A `TaskStream` submitted on other results: its window; -1 for any
+    other task."""
 
     def __init__(
         out self,
@@ -262,6 +272,7 @@ struct _Task(Copyable, Movable):
         kind: UInt8 = KIND_TASK,
         var node: String = String(),
         many: Int = 0,
+        window: Int = -1,
     ):
         self.object_id = object_id
         self.task_id = task_id
@@ -271,6 +282,12 @@ struct _Task(Copyable, Movable):
         self.kind = kind
         self.node = node^
         self.many = many
+        self.window = window
+
+    def is_stream(self) -> Bool:
+        """Whether it runs a `TaskStream`: a task-stream, or task-inputs
+        for one submitted on other results."""
+        return self.kind == KIND_TASK_STREAM or self.window >= 0
 
 
 struct _Actor(Copyable, Movable):
@@ -1424,6 +1441,18 @@ struct Head(Movable):
                     var last = f.object_id + UInt64(many - 1)
                     if owner_of(last) != owner_of(f.object_id):
                         raise Error("task-many results run past their IDs")
+                var window = -1
+                if flags & STREAM:
+                    if flags & MANY or len(f.payload) < 17:
+                        raise Error("bad task-after for a stream")
+                    window = Int(get_scalar[DType.uint64](f.payload, pos))
+                    if window < 0:
+                        raise Error("task-after with a bad stream window")
+                    var last = f.object_id + UInt64(ITEMS_PER_STREAM)
+                    if last < f.object_id or owner_of(last) != owner_of(
+                        f.object_id
+                    ):
+                        raise Error("task-stream items run past their IDs")
                 var n = Int(get_scalar[DType.uint64](f.payload, pos))
                 if n < 0 or n > (len(f.payload) - pos) // 8:
                     raise Error("task-after with a bad input count ", n)
@@ -1449,6 +1478,8 @@ struct Head(Movable):
                         if not self._known(part):
                             self._hold(part)
                     self._many[f.object_id] = many
+                if window >= 0:
+                    self._streams[f.object_id] = 0
                 var missing = False
                 for d in deps:
                     if d not in self._refs:
@@ -1472,6 +1503,7 @@ struct Head(Movable):
                     deps=deps^,
                     gather=gather,
                     many=many,
+                    window=window,
                 )
             elif f.kind == KIND_TASK_MANY:
                 self._task_many(f^)
@@ -1979,6 +2011,10 @@ struct Head(Movable):
                 if self._roles[i] != ROLE_WORKER or self._hosting[i] != 0:
                     continue
                 if self._hashes[i] != h or self._draining[i] != _DRAIN_NO:
+                    continue
+                if self._streams_on(i) > 0:
+                    # The actor would wait for the stream to end, which may
+                    # wait for its driver to read it: wait for a worker.
                     continue
                 if best < 0 or len(self._inflight[i]) < len(
                     self._inflight[best]
@@ -3054,6 +3090,9 @@ struct Head(Movable):
                 var args = List[UInt8]()
                 if t.many > 0:
                     put_scalar[DType.uint64](args, UInt64(t.many))
+                if t.window >= 0:
+                    # A `TaskStream` runs on its window, then the input.
+                    put_scalar[DType.uint64](args, UInt64(t.window))
                 args.extend(Span(t.args))
                 if t.gather:
                     put_scalar[DType.int64](args, Int64(len(t.deps)))
@@ -3063,6 +3102,8 @@ struct Head(Movable):
                     except:
                         pass
                 var kind = KIND_TASK_MANY if t.many > 0 else KIND_TASK
+                if t.window >= 0:
+                    kind = KIND_TASK_STREAM
                 self._enqueue(_Task(id, t.task_id, args^, kind=kind))
                 self._stamp_queued(id)
             else:
@@ -3083,9 +3124,13 @@ struct Head(Movable):
             flags |= WITH_VALUE
         if t.many > 0:
             flags |= MANY
+        if t.window >= 0:
+            flags |= STREAM
         var spec: List[UInt8] = [flags]
         if t.many > 0:
             put_scalar[DType.uint64](spec, UInt64(t.many))
+        if t.window >= 0:
+            put_scalar[DType.uint64](spec, UInt64(t.window))
         put_scalar[DType.uint64](spec, UInt64(len(t.deps)))
         for d in t.deps:
             if d in self._location:
@@ -3226,8 +3271,21 @@ struct Head(Movable):
     def _capacity(self, i: Int) -> Int:
         """Tasks worker `i` is sent at once: the slots it has room for, and
         `pipeline - 1` more waiting there, so a slot that frees has the next
-        one at hand."""
+        one at hand. A slot held by a stream isn't one: a stream runs until
+        its driver reads it, so with every slot held by one, a task sent
+        there would wait on that driver, who may be waiting on the task."""
+        var streams = self._streams_on(i)
+        if streams > 0 and streams >= self._admit[i]:
+            return streams
         return self._admit[i] + self._pipeline - 1
+
+    def _streams_on(self, i: Int) -> Int:
+        """How many streams worker `i` is running."""
+        var n = 0
+        for entry in self._stream_at.items():
+            if entry.value == i:
+                n += 1
+        return n
 
     def _order(self, depth: Int) -> List[Int]:
         """The workers with `depth` tasks in flight, in the order a round
@@ -3337,7 +3395,7 @@ struct Head(Movable):
                     continue
                 var obj = t.object_id
                 self._tries[obj] = self._tries.get(obj, 0) + 1
-                if t.kind == KIND_TASK_STREAM:
+                if t.is_stream():
                     self._stream_at[obj] = i
                 if self._task_timeout > 0:
                     self._due[obj] = wall_ns() + self._task_timeout
@@ -3354,7 +3412,7 @@ struct Head(Movable):
                 except e:
                     print("dista head: lost worker:", e)
                     lost = True
-                var stop = t.kind == KIND_TASK_STREAM and obj in self._dead
+                var stop = t.is_stream() and obj in self._dead
                 # Running before the drop, which sends it to another worker.
                 self._running[obj] = t^
                 if lost:

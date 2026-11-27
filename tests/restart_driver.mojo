@@ -10,13 +10,20 @@ The driver sends everything, then waits until the file named by
 `RESTART_GATE` exists, which the script creates once it has killed and
 restarted the head. So the restart always lands while the driver still has
 every answer to collect, however fast or slow the machine is.
+
+A stream starts first, and the driver reads two of its items before it sends
+the rest. Its window then holds it, unfinished, through the restart: after
+it, `next` returns the items that had come and then fails with "stream
+interrupted: the head restarted", since the driver doesn't send a stream
+again. The items it returned must be right.
 """
 
 from std.os import getenv
 from std.os.path import exists
 from std.time import sleep
 
-from dista import Actor, Method, ObjectRef, Runtime, Seq, Task
+from dista import Actor, Emit, Method, ObjectRef, Runtime, Seq, Task
+from dista import TaskStream
 
 
 def blob(n: Int) -> String:
@@ -51,11 +58,18 @@ def slow_add(mut c: Counter, n: Int) -> Int:
     return c.total
 
 
+def count_slowly(n: Int, mut out: Emit[Int]) raises:
+    for k in range(n):
+        sleep(0.001)
+        out.put(k)
+
+
 comptime Blob = Task[Int, String, blob]
 comptime TotalLength = Task[Seq[String], Int, total_length]
 comptime Square = Task[Int, Int, square]
 comptime CounterActor = Actor[Counter, Int, new_counter]
 comptime SlowAdd = Method[CounterActor, Int, Int, slow_add]
+comptime CountSlowly = TaskStream[Int, Int, count_slowly]
 
 comptime CALLS = 300
 
@@ -73,9 +87,14 @@ def wait_for_gate() raises:
 
 
 def main() raises:
-    var rt = Runtime[Blob, TotalLength, Square, CounterActor, SlowAdd](
-        workers=4
-    )
+    var rt = Runtime[
+        Blob, TotalLength, Square, CounterActor, SlowAdd, CountSlowly
+    ](workers=4)
+    # Far more items than its window: it can't end before the restart.
+    var s = rt.stream[CountSlowly](1_000_000, window=4)
+    var items = List[Int]()
+    for _ in range(2):
+        items.append(rt.take(rt.next(s).value()))
     var counter = rt.create[CounterActor](0, checkpoint_every=50)
     var adds = List[ObjectRef[Int]](capacity=CALLS)
     for _ in range(CALLS):
@@ -89,6 +108,19 @@ def main() raises:
     for i in range(400):
         squares.append(rt.remote[Square](i))
     wait_for_gate()
+    var why = String("it ended")
+    try:
+        while True:
+            var r = rt.next(s)
+            if not r:
+                break
+            items.append(rt.take(r.value()))
+    except e:
+        why = String(e)
+    for k in range(len(items)):
+        if items[k] != k:
+            raise Error("stream item ", k, " was ", items[k])
+    print("stream:", len(items), "items, then", why)
     var sum = 0
     for r in squares:
         sum += rt.get(r)

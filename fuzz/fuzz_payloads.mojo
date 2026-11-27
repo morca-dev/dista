@@ -60,6 +60,15 @@ def main() raises:
     put_scalar[DType.uint64](spec, 6)
     spec.extend(loc.encode())
     seeds.append(spec^)
+    # A stream's: the STREAM flag, its window, one input inline.
+    var stream: List[UInt8] = [0, 8]
+    put_scalar[DType.uint64](stream, 16)
+    put_scalar[DType.uint64](stream, 1)
+    stream.append(0)
+    put_scalar[DType.uint64](stream, 5)
+    put_scalar[DType.uint64](stream, 1)
+    stream.append(7)
+    seeds.append(stream^)
     var locs: List[UInt8] = [1]
     locs.extend(loc.encode())
     locs.extend(loc.encode())

@@ -403,6 +403,16 @@ struct Runtime[*Ts: TaskLike](Movable):
         Self._check_registered[T]()
         return self._c.stream[T](arg, window)
 
+    def stream[
+        T: StreamLike
+    ](mut self, arg: ObjectRef[T.A], window: Int = 16) raises -> StreamRef[
+        T.Item
+    ]:
+        """Submits task `T`, a `TaskStream`, to run on another task's result
+        once it exists."""
+        Self._check_registered[T]()
+        return self._c.stream[T](arg, window)
+
     def next[
         X: AnyType
     ](

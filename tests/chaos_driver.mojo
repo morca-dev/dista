@@ -6,12 +6,16 @@ results. Some results are released as soon as their dependents are
 submitted. Every result still held is checked against the same functions run
 in this process, so the cluster's answers have to be exactly the ones a
 single process gets, however often the head died along the way.
+
+A stream runs beside them, read at the end: it either ends with all its
+items or fails with "stream interrupted: the head restarted", and the items
+`next` returned before must be right either way.
 """
 
 from std.os import getenv
 from std.time import sleep
 
-from dista import ObjectRef, Runtime, Seq, Task
+from dista import Emit, ObjectRef, Runtime, Seq, Task, TaskStream
 
 
 @fieldwise_init
@@ -37,8 +41,16 @@ def join(xs: Seq[String]) -> String:
     return String(chr(97 + h % 26)) * (total % 200_000 + 1)
 
 
+def count(n: Int, mut out: Emit[Int]) raises:
+    for k in range(n):
+        sleep(0.002)
+        out.put(k * k)
+
+
 comptime Make = Task[Leaf, String, make]
 comptime Join = Task[Seq[String], String, join]
+comptime Count = TaskStream[Int, Int, count]
+comptime ITEMS = 200
 
 
 struct Rng:
@@ -70,7 +82,8 @@ def main() raises:
     var progress = getenv("CHAOS_PROGRESS")
     var steps = 0
     var rng = Rng(seed)
-    var rt = Runtime[Make, Join](workers=4)
+    var rt = Runtime[Make, Join, Count](workers=4)
+    var s = rt.stream[Count](ITEMS, window=8)
     var refs = List[ObjectRef[String]]()
     var local = List[String]()
     var released = List[Bool]()
@@ -109,4 +122,31 @@ def main() raises:
         checked += 1
         steps += 1
         _progress(progress, steps)
-    print("PASS chaos seed", seed, ":", n, "tasks,", checked, "checked")
+    var items = 0
+    var ended = String("all items")
+    try:
+        while True:
+            var r = rt.next(s)
+            if not r:
+                break
+            if rt.take(r.value()) != items * items:
+                raise Error("seed ", seed, ": stream item ", items, " differs")
+            items += 1
+    except e:
+        if String(e) != "stream interrupted: the head restarted":
+            raise e^
+        ended = String(e)
+    if ended == "all items" and items != ITEMS:
+        raise Error("seed ", seed, ": the stream ended after ", items)
+    print(
+        "PASS chaos seed",
+        seed,
+        ":",
+        n,
+        "tasks,",
+        checked,
+        "checked, a stream of",
+        items,
+        "items:",
+        ended,
+    )

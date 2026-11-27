@@ -95,6 +95,16 @@ def length(s: String) -> Int:
     return s.byte_length()
 
 
+def big(k: Int) -> String:
+    return _big(k)
+
+
+def lengths_of(s: String, mut out: Emit[Int]) raises:
+    """Puts its argument's length, then its first byte."""
+    out.put(s.byte_length())
+    out.put(Int(s.as_bytes()[0]))
+
+
 comptime CountUp = TaskStream[Int, Int, count_up]
 comptime BigItems = TaskStream[Int, String, big_items]
 comptime SlowTwo = TaskStream[Int, Int, slow_two]
@@ -104,6 +114,8 @@ comptime Megabytes = TaskStream[Int, String, megabytes]
 comptime PutUntilStopped = TaskStream[String, Int, put_until_stopped]
 comptime Double = Task[Int, Int, double]
 comptime Length = Task[String, Int, length]
+comptime Big = Task[Int, String, big]
+comptime LengthsOf = TaskStream[String, Int, lengths_of]
 
 
 def _seconds_since(t0: Int) -> Float64:
@@ -235,6 +247,43 @@ def test_items_feed_other_tasks() raises:
         assert_equal(rt.take(lengths[k]), _big(k).byte_length())
 
 
+def _after(slots: Int) raises:
+    """A stream on another task's result: a task-after with the `STREAM`
+    flag, run as a stream once its input exists, which is small and goes
+    through the head, or stored and fetched (task-inputs)."""
+    _slots(slots)
+    var rt = Runtime[CountUp, LengthsOf, Double, Big](workers=2)
+    _slots(1)
+    var s = rt.stream[CountUp](rt.remote[Double](5), window=4)
+    var k = 0
+    while True:
+        var r = rt.next(s)
+        if not r:
+            break
+        assert_equal(r.value().id, s.id + 1 + UInt64(k))
+        assert_equal(rt.take(r.value()), k)
+        k += 1
+    assert_equal(k, 10)
+    var input = rt.remote[Big](3)
+    assert_true(rt.location(input) != "")  # stored on its worker
+    var b = rt.stream[LengthsOf](input)
+    rt.release(input)  # the stream given it still gets it
+    var got = List[Int]()
+    while True:
+        var r = rt.next(b)
+        if not r:
+            break
+        got.append(rt.take(r.value()))
+    assert_equal(len(got), 2)
+    assert_equal(got[0], _big(3).byte_length())
+    assert_equal(got[1], Int(_big(3).as_bytes()[0]))
+
+
+def test_a_stream_runs_on_another_tasks_result() raises:
+    _after(1)
+    _after(4)
+
+
 def test_wait_picks_the_stream_with_an_item() raises:
     var rt = Runtime[Late](workers=3, pipeline=1)
     var slow1 = rt.stream[Late](2000)
@@ -363,6 +412,21 @@ def test_a_one_slot_worker_serves_a_fetch_while_its_stream_waits() raises:
         assert_true(rt.take(r.value()) == _big(k))
         k += 1
     assert_equal(k, 3)
+
+
+def test_tasks_go_around_a_blocked_stream() raises:
+    """A one-slot worker whose stream waits for its reader is sent no task
+    to wait behind it: the tasks run on the other worker, while the driver
+    reads nothing of the stream."""
+    var rt = Runtime[CountUp, Double](workers=2, pipeline=4)
+    var s = rt.stream[CountUp](100, window=2)
+    assert_true(Bool(rt.next(s, timeout=10.0)))  # it runs, and then waits
+    var refs = List[ObjectRef[Int]]()
+    for k in range(8):
+        refs.append(rt.remote[Double](k))
+    for k in range(8):
+        assert_equal(rt.get(refs[k], timeout=10.0), 2 * k)
+    rt.cancel(s)
 
 
 def test_a_zero_window_never_blocks() raises:

@@ -4,7 +4,8 @@
 # again on the same port. Workers rejoin with their results, the driver
 # resumes, and its answers must be exact. That includes an actor's: every
 # process shares a checkpoint directory, and the new head restores the actor
-# from its newest checkpoint.
+# from its newest checkpoint. A stream unfinished at the restart fails with
+# "stream interrupted: the head restarted", after the items it had answered.
 set -euo pipefail
 mkdir -p build
 export DISTA_CHECKPOINT_URI=$PWD/build/restart-checkpoints
@@ -64,6 +65,9 @@ if [ $status != 0 ] || [ "$out" != "$want" ]; then
   cat build/restart-driver.log; tail -20 build/restart-head.log build/restart-workers.log
   exit 1
 fi
+grep -q "^stream: [0-9]* items, then stream interrupted: the head restarted$" build/restart-driver.log \
+  || { echo "FAIL: the unfinished stream: $(grep '^stream' build/restart-driver.log)"; exit 1; }
+grep "^stream" build/restart-driver.log
 grep -q "resuming" build/restart-driver.log || { echo "FAIL: the driver never lost its head"; exit 1; }
 grep "restoring actor" build/restart-head.log || { echo "FAIL: the actor wasn't restored from a checkpoint"; exit 1; }
-echo "PASS head restart: killed mid-run, workers rejoined, the driver resumed, answers and the actor's count exact"
+echo "PASS head restart: killed mid-run, workers rejoined, the driver resumed, answers and the actor's count exact, the stream interrupted"

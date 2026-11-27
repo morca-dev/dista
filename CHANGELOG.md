@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`rt.wait(refs, count, timeout)`** returns which of several refs have finished, without reading them; `rt.wait(ids)` takes object ids, for refs of several result types.
 - **`TaskStream`**, `rt.stream` and `rt.next`: a task hands over each result as it makes it, each an object of its own.
 - **A stream's window and cancelling:** `put` waits while `window` items are unread, and `rt.cancel(s)`, `rt.release(s)` or a departed driver makes it raise `cancelled`.
+- **Streams under failure:** a stream whose worker is lost before any item runs again elsewhere, and after one its end fails; a head restart fails an unfinished stream; `rt.stream` takes another task's result.
+
+### Fixed
+
+- A driver resuming after a failed send first reads what the old head had sent, so no answer in it is lost.
+- A driver tells the head it released a result only once the tasks it submitted on it have settled, so a head restart can't strand them on a freed input.
+- The head sends no task to wait behind streams holding all of a worker's slots, and places no actor on a worker running a stream: either would wait for the stream's reader.
 
 ## [0.6.2] - 2026-11-26
 
