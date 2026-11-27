@@ -37,7 +37,6 @@ from dista import (
 from dista.codec import put_scalar
 from dista.conn import Conn
 from dista.frame import (
-    KIND_DRAIN,
     KIND_FREE,
     KIND_GROUPS,
     KIND_HELLO,
