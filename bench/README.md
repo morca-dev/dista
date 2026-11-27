@@ -3,7 +3,9 @@
 A second benchmark, [shuffle/](shuffle/README.md), spends its time in user
 code and in a shuffle instead of in reading Parquet: trips by zone pair and
 hour, as map tasks partitioning by key and reduce tasks taking their
-partition from every map task, on dista and Ray. Below is the first one.
+partition from every map task, on dista and Ray. A third,
+[embed/](embed/README.md), is planned: an embedding job as a flow, beside
+Ray Data. Below is the first one.
 
 The same program three times: taxibench's eight queries over the NYC taxi
 Iceberg table (79.5M trips, 24 monthly files, 1.3 GB). Each query runs as one
