@@ -58,6 +58,7 @@ from dista.client import TaskContext
 from dista.frame import KIND_TASK_STREAM
 from dista.sizing import AUTO, Sizing
 from dista.stream import StreamSink
+from dista.task import StatesPtr
 from dista.socket import close_fd, set_nonblocking, wall_ns
 
 comptime DispatchFn = def(
@@ -205,6 +206,7 @@ struct _Shared(Movable):
         resume_at: String,
         registry_hash: UInt64,
         groups: List[UInt8],
+        states: Optional[StatesPtr],
     ) raises:
         self.mutex = Mutex()
         self.cond = CondVar()
@@ -220,7 +222,9 @@ struct _Shared(Movable):
             self.state.append(IDLE)
             self.jobs.append(Job())
             self.ctxs.append(
-                TaskContext(head_addr, resume_at, registry_hash, groups.copy())
+                TaskContext(
+                    head_addr, resume_at, registry_hash, groups.copy(), states
+                )
             )
             self.mail.append(List[StreamItem]())
             self.window.append(0)
@@ -284,7 +288,9 @@ struct Executors[dispatch: DispatchFn](Movable):
         resume_at: String = "",
         registry_hash: UInt64 = 0,
         groups: List[UInt8] = List[UInt8](),
+        states: Optional[StatesPtr] = None,
     ) raises:
+        """`states` is the worker's, which every slot's stateful tasks share."""
         if n < 1:
             raise Error("a worker needs at least one slot")
         var fds = Array[c_int, 2](fill=-1)
@@ -298,7 +304,9 @@ struct Executors[dispatch: DispatchFn](Movable):
         self._wake_r = fds[0]
         self._shared = unsafe_alloc[_Shared](1)
         self._shared.unsafe_write(
-            _Shared(n, fds[1], head_addr, resume_at, registry_hash, groups)
+            _Shared(
+                n, fds[1], head_addr, resume_at, registry_hash, groups, states
+            )
         )
         self._threads = List[ThreadHandle](capacity=n)
         self._busy = List[Bool](capacity=n)

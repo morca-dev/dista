@@ -18,6 +18,13 @@ serving; it still builds each task's arguments and stores and reports each
 result itself, so the store and the connections stay on its thread. Actor
 frames always run on the loop, one at a time.
 
+A `StatefulTask` runs as any task does, on the loop or on a slot. Its state
+lives in the worker's `WorkerStates`, which the loop's context and every
+slot's share: the first call builds it under its lock, and each call holds
+that lock while it runs, so a type's calls run one at a time while other
+tasks run beside them. A call waiting for the lock keeps its slot. The
+states are destroyed with the worker.
+
 A `TaskStream` reports each item as it puts it, as a result of its own: with
 one slot `put` stores and reports it at once, on the loop's thread, and with
 more it leaves it in its slot's mailbox for the loop (`executors.mojo`).
@@ -61,6 +68,7 @@ checkpoints stay.
 """
 
 from std.ffi import c_int, external_call
+from std.memory.alloc import unsafe_alloc
 from std.os import getenv
 
 from dista.auth import cluster_token
@@ -130,7 +138,13 @@ from dista.metrics import (
 from dista.head import owner_of
 from memory_region import SharedMapping
 from dista.signals import take_wakes, wake_on_sigterm
-from dista.task import StatePtr, check_group, split_parts
+from dista.task import (
+    StatePtr,
+    StatesPtr,
+    WorkerStates,
+    check_group,
+    split_parts,
+)
 from dista.sizing import (
     CAPACITY_ANNOUNCE,
     InFlight,
@@ -518,6 +532,8 @@ struct Worker[
     covers, that may still be restored from."""
     var _ctx: TaskContext
     """The client a `CtxTask` calls actors through, opened on first use."""
+    var _states: StatesPtr
+    """The stateful tasks' states, which the loop and every slot share."""
     var _metrics: Optional[Listener]
     """Where `/metrics` is served, with `DISTA_METRICS_PORT` set."""
     var _ran: Int
@@ -656,8 +672,10 @@ struct Worker[
         self._answers = Dict[UInt64, _Answer]()
         self._calls = 0
         self._checkpointed = False
+        self._states = unsafe_alloc[WorkerStates](1)
+        self._states.unsafe_write(WorkerStates())
         self._ctx = TaskContext(
-            head_addr, resume_at, registry_hash, groups.copy()
+            head_addr, resume_at, registry_hash, groups.copy(), self._states
         )
         self._metrics = None
         try:
@@ -685,7 +703,12 @@ struct Worker[
         self._pool = None
         if self._slots > 1:
             self._pool = Executors[Self.dispatch](
-                self._slots, head_addr, resume_at, registry_hash, groups
+                self._slots,
+                head_addr,
+                resume_at,
+                registry_hash,
+                groups,
+                self._states,
             )
         self._inflight = None
         self._learned = Learned()
@@ -744,6 +767,12 @@ struct Worker[
         # Results in the node store are files: remove them with the worker.
         for entry in self._files.items():
             remove_file(entry.value.path)
+        # The stateful tasks' states go with the worker, unless a slot still
+        # runs a task, which may be using one: the executors are then
+        # detached, and the states left to the process's exit as theirs are.
+        if not self._pool or self._pool.value().running() == 0:
+            _ = self._states.unsafe_take_pointee()
+            self._states.unsafe_free()
 
     def run(mut self) raises:
         """Serves until the head hangs up, or until a drain ends."""

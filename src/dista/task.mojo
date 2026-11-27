@@ -48,10 +48,27 @@ hosting an actor keeps its state behind a `StatePtr`, which only the actor's
 own `create`, `destroy`, `save` and `restore` and its methods' `call` cast
 back to its type. A checkpoint is the state through the codec, so a state
 type that implements `Codec` chooses what it saves.
+
+A stateful task is a task whose function also gets a state, which each
+worker builds with `new` before the first call it runs and keeps until it
+exits:
+
+```mojo
+def load_model() raises -> Model: ...
+def encode(mut m: Model, batch: RecordBatch) raises -> RecordBatch: ...
+
+comptime Encode = StatefulTask[Model, RecordBatch, RecordBatch, load_model, encode]
+```
+
+It is submitted, routed, retried and released as a `Task` is. The worker
+keeps one state per task type in its `WorkerStates`, and runs one call of
+each type at a time, behind that state's lock.
 """
 
 from std.memory.alloc import unsafe_alloc
 from std.reflection import reflect_fn
+
+from threads import Mutex
 
 from dista.codec import decode, encode, get_scalar, put_scalar
 from dista.seq import Seq
@@ -528,3 +545,160 @@ struct Method[
         var a = _decode_all[Self.A](Self.name(), args)
         var r = Self.f(state.unsafe_bitcast[Self.Act.S]()[], a)
         encode(r, out)
+
+
+trait StatefulLike(TaskLike):
+    """A task with a state on each worker (`StatefulTask`)."""
+
+    comptime S: Movable & Deinitable
+    """The state's type."""
+
+    @staticmethod
+    def run_with(
+        states: StatesPtr, args: Span[UInt8, _], mut out: List[UInt8]
+    ) raises:
+        """Runs the function on this worker's state, built first if it isn't
+        yet, and appends the encoded result."""
+        ...
+
+
+struct _Held(Movable):
+    """One task type's state on a worker, and the lock its calls take."""
+
+    var lock: Mutex
+    var state: Optional[StatePtr]
+    """The state, once `new` has built it."""
+    var destroy: def(StatePtr) thin
+    """Destroys it, as its task type's `destroy` does."""
+
+    def __init__(out self, destroy: def(StatePtr) thin) raises:
+        self.lock = Mutex()
+        self.state = None
+        self.destroy = destroy
+
+
+comptime HeldPtr = Pointer[_Held, MutUntrackedOrigin]
+
+
+struct WorkerStates(Movable):
+    """A worker's stateful tasks' states, one per task type, shared by its
+    slots. The table's lock guards only the table; each state has its own,
+    which a call holds while it runs. An entry, once made, stays at its
+    address until the table is destroyed."""
+
+    var _lock: Mutex
+    var _held: Dict[UInt64, HeldPtr]
+
+    def __init__(out self) raises:
+        self._lock = Mutex()
+        self._held = Dict[UInt64, HeldPtr]()
+
+    @staticmethod
+    def held(
+        states: Pointer[Self, MutUntrackedOrigin],
+        id: UInt64,
+        destroy: def(StatePtr) thin,
+    ) raises -> HeldPtr:
+        """Task type `id`'s entry in `states`, made empty the first time it's
+        asked for.
+
+        It takes the table by pointer, not as `mut self`: a `mut` argument
+        is taken to be the only reference to its value, so the compiler may
+        read the table before the lock is held, and two threads would each
+        find it empty."""
+        states[]._lock.lock()
+        var p = states[]._held.get(id)
+        if not p:
+            try:
+                var h = unsafe_alloc[_Held](1)
+                h.unsafe_write(_Held(destroy))
+                states[]._held[id] = h
+                p = h
+            except e:
+                states[]._lock.unlock()
+                raise e^
+        states[]._lock.unlock()
+        return p.value()
+
+    def __deinit__(deinit self):
+        """Destroys every state. Only once no call can be running."""
+        for entry in self._held.items():
+            var h = entry.value
+            if h[].state:
+                h[].destroy(h[].state.value())
+            _ = h.unsafe_take_pointee()
+            h.unsafe_free()
+
+
+comptime StatesPtr = Pointer[WorkerStates, MutUntrackedOrigin]
+"""A worker's `WorkerStates`, which its slots share."""
+
+
+struct StatefulTask[
+    S_: Movable & Deinitable,
+    A_: Movable & Deinitable,
+    R_: Movable & Deinitable,
+    new: def() thin raises -> S_,
+    f: def(mut S_, A_) thin raises -> R_,
+    group: StaticString = "",
+](StatefulLike):
+    """A task taking one `A_` and returning an `R_`, whose function also gets
+    its worker's `S_`: `new` builds it on the worker before the first call
+    the worker runs, and the worker keeps it until it exits. A worker runs
+    one call at a time; if `new` raises, the call fails with its error and
+    the next call tries again. It isn't an actor: any worker of its group
+    runs it, and nothing saves the state."""
+
+    comptime S = Self.S_
+    comptime A = Self.A_
+    comptime R = Self.R_
+
+    @staticmethod
+    def name() -> StaticString:
+        return reflect_fn[Self.f].linkage_name()
+
+    @staticmethod
+    def id() -> UInt64:
+        return fnv1a64(Self.name())
+
+    @staticmethod
+    def group_name() -> StaticString:
+        return Self.group
+
+    @staticmethod
+    def run(args: Span[UInt8, _], mut out: List[UInt8]) raises:
+        raise Error(Self.name(), " has a state: it runs only on a worker")
+
+    @staticmethod
+    def create(args: Span[UInt8, _]) raises -> StatePtr:
+        var p = unsafe_alloc[Self.S](1)
+        try:
+            p.unsafe_write(Self.new())
+        except e:
+            p.unsafe_free()
+            raise e^
+        return p.unsafe_bitcast[NoneType]()
+
+    @staticmethod
+    def destroy(state: StatePtr):
+        var p = state.unsafe_bitcast[Self.S]()
+        _ = p.unsafe_take_pointee()
+        p.unsafe_free()
+
+    @staticmethod
+    def run_with(
+        states: StatesPtr, args: Span[UInt8, _], mut out: List[UInt8]
+    ) raises:
+        var a = _decode_all[Self.A](Self.name(), args)
+        var h = WorkerStates.held(states, Self.id(), Self.destroy)
+        var none = List[UInt8]()
+        h[].lock.lock()
+        try:
+            if not h[].state:
+                h[].state = Self.create(none)
+            var r = Self.f(h[].state.value().unsafe_bitcast[Self.S]()[], a)
+            encode(r, out)
+        except e:
+            h[].lock.unlock()
+            raise e^
+        h[].lock.unlock()

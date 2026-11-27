@@ -4,18 +4,20 @@ held, an error a task or a stream raises fails the flow and leaves the
 stores empty, and the edge cases: no inputs, an input with no items, and a
 flow run twice. A task or a stream that kills its worker once makes its
 input read again, with results still exact, and an input lost on every
-attempt fails the flow after its retries.
+attempt fails the flow after its retries. A `MapWith` in a gpu group runs
+every batch on a gpu worker, each of which builds its state once.
 
 The tasks that write files find their directory in `FLOW_TEST_DIR`, set
 before a `Runtime` forks its workers, which inherit it."""
 
-from std.os import getenv, makedirs, setenv, unsetenv
+from std.ffi import c_int, external_call
+from std.os import getenv, listdir, makedirs, remove, setenv, unsetenv
 from std.os.path import exists
 from std.testing import TestSuite, assert_equal, assert_true
 from std.time import perf_counter_ns, sleep
 
-from dista import Emit, Runtime, Task, TaskLike, TaskStream
-from dista.flow import Flow, Map, Read
+from dista import Emit, Runtime, StatefulTask, Task, TaskLike, TaskStream
+from dista.flow import Flow, Map, MapWith, Read
 from dista.loss import is_loss
 from dista.socket import exit_now, wall_ns
 
@@ -147,6 +149,48 @@ comptime ItemsDyingOnce = TaskStream[Int, Int, items_dying_once]
 comptime ItemsDyingOn2 = TaskStream[Int, Int, items_dying_on_2]
 
 comptime Labels = Flow[Read[ItemsOf], Map[AddOne], Map[Label]]
+
+
+@fieldwise_init
+struct Doubler(Movable):
+    """A state: the factor to multiply by, and the group it was built in."""
+
+    var factor: Int
+    var group: String
+
+
+def new_doubler() raises -> Doubler:
+    """Writes `build-<pid>` to `FLOW_TEST_DIR` the first time this process
+    builds one, and `again-<pid>` after."""
+    var g = getenv("DISTA_GROUP")
+    var pid = Int(external_call["getpid", c_int]())
+    var path = String(_dir(), "/build-", pid)
+    if exists(path):
+        path = String(_dir(), "/again-", pid)
+    with open(path, "w") as f:
+        f.write(g)
+    return Doubler(2, g if g != "" else String("-"))
+
+
+def double(mut d: Doubler, x: Int) raises -> String:
+    """`x` times the factor, tagged with the state's group."""
+    return String(d.group, ":", x * d.factor)
+
+
+def untag(s: String) raises -> Int:
+    """The number of a `double` result, which must come from a gpu worker."""
+    if not s.startswith("gpu:"):
+        raise Error("a MapWith batch ran outside gpu: ", s)
+    return Int(s.split(":")[1])
+
+
+comptime Double = StatefulTask[
+    Doubler, Int, String, new_doubler, double, group="gpu"
+]
+comptime Untag = Task[String, Int, untag]
+comptime Doubled = Flow[
+    Read[ItemsOf], Map[AddOne], MapWith[Double, budget=8], Map[Untag]
+]
 
 
 def _inputs(n: Int) -> List[Int]:
@@ -419,6 +463,30 @@ def test_no_inputs_an_empty_input_and_a_flow_run_twice() raises:
     assert_equal(len(first), 5 * ITEMS)
     for k in range(len(first)):
         assert_equal(first[k], second[k])
+    _assert_empty(rt)
+
+
+def test_a_map_with_runs_on_gpu_workers_with_a_state_each() raises:
+    var dir = "build/flow-map-with"
+    if not exists(dir):
+        makedirs(dir)
+    for name in listdir(dir):
+        remove(String(dir, "/", name))
+    _ = setenv("FLOW_TEST_DIR", dir)
+    # Six workers of no group, as above: the read's 4 streams each hold one.
+    var rt = Runtime[ItemsOf, AddOne, Double, Untag](workers=6, groups="gpu=2")
+    var out = Doubled.run(rt, _inputs(20))
+    assert_equal(len(out), 20 * ITEMS)
+    for i in range(20):
+        for k in range(ITEMS):
+            assert_equal(out[i * ITEMS + k], (i * 1000 + k + 1) * 2)
+    var builds = 0
+    for name in listdir(dir):
+        assert_true(name.startswith("build-"), String("built twice: ", name))
+        with open(String(dir, "/", name), "r") as f:
+            assert_equal(f.read(), "gpu")
+        builds += 1
+    assert_true(builds >= 1 and builds <= 2, String(builds))
     _assert_empty(rt)
 
 

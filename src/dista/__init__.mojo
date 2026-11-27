@@ -29,6 +29,12 @@ var total = rt.call[Add](c, 5)  # an ObjectRef[Int]
 rt.kill(c)
 ```
 
+A stateful task keeps a state on each worker that runs it, such as a model:
+
+```mojo
+comptime Encode = StatefulTask[Model, Batch, Batch, load_model, encode]
+```
+
 See DESIGN.md for how it works.
 """
 
@@ -54,6 +60,8 @@ from dista.task import (
     ManyLike,
     Method,
     MethodLike,
+    StatefulLike,
+    StatefulTask,
     Task,
     Task2,
     Task2Like,

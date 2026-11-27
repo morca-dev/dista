@@ -15,7 +15,9 @@ var files = Embed.run(rt, paths)  # every file written, by input
 ```
 
 Each input is read by one stream, the `Read`, and each of its items goes
-through every `Map` in turn, as a task on the result of the one before. The
+through every `Map` in turn, as a task on the result of the one before. A
+`MapWith` is a `Map` whose task is a `StatefulTask`, whose state each worker
+builds once, such as a model; a `Map` refuses one at `start`. The
 last operator's results are the flow's. `run` returns them all as values,
 by input and then in the read's order. `start` returns a `FlowRun`, whose
 `next` returns one finished input at a time: its position in the inputs and
@@ -49,7 +51,7 @@ from dista.client import Client, ObjectRef
 from dista.loss import is_loss
 from dista.runtime import Runtime
 from dista.stream import StreamLike, StreamRef
-from dista.task import TaskLike
+from dista.task import StatefulLike, TaskLike
 
 
 trait OpLike:
@@ -62,6 +64,8 @@ trait OpLike:
     """What it makes: a `Read`'s items, or a `Map`'s results."""
     comptime IS_READ: Bool
     """Whether it's a `Read`, which only the first operator is."""
+    comptime KIND: StaticString
+    """Its kind as an error names it: "Read", "Map" or "MapWith"."""
     comptime BUDGET: Int
     """A `Map`'s budget, or a `Read`'s streams at once."""
     comptime WINDOW: Int
@@ -88,6 +92,7 @@ struct Read[T: StreamLike, streams: Int = 4, window: Int = 16](OpLike):
     comptime In = Self.T.A
     comptime Out = Self.T.Item
     comptime IS_READ = True
+    comptime KIND = "Read"
     comptime BUDGET = Self.streams
     comptime WINDOW = Self.window
     comptime Task = Self.T
@@ -109,6 +114,7 @@ struct Map[T: TaskLike, budget: Int = 16](OpLike):
     comptime In = Self.T.A
     comptime Out = Self.T.R
     comptime IS_READ = False
+    comptime KIND = "Map"
     comptime BUDGET = Self.budget
     comptime WINDOW = 0
     comptime Task = Self.T
@@ -116,6 +122,28 @@ struct Map[T: TaskLike, budget: Int = 16](OpLike):
     @staticmethod
     def open(mut c: Client, arg: Self.In) raises -> UInt64:
         raise Error("a Map reads no input")
+
+    @staticmethod
+    def submit(mut c: Client, input: UInt64) raises -> UInt64:
+        return c.remote[Self.T](ObjectRef[Self.T.A](input)).id
+
+
+struct MapWith[T: StatefulLike, budget: Int = 16](OpLike):
+    """A `Map` whose task is a `StatefulTask`: each worker that runs it
+    builds the task's state once and keeps it for every batch it is given.
+    In the executor it is a `Map`. A plain `Task` doesn't compile here."""
+
+    comptime In = Self.T.A
+    comptime Out = Self.T.R
+    comptime IS_READ = False
+    comptime KIND = "MapWith"
+    comptime BUDGET = Self.budget
+    comptime WINDOW = 0
+    comptime Task = Self.T
+
+    @staticmethod
+    def open(mut c: Client, arg: Self.In) raises -> UInt64:
+        raise Error("a MapWith reads no input")
 
     @staticmethod
     def submit(mut c: Client, input: UInt64) raises -> UInt64:
@@ -151,8 +179,8 @@ struct _Batch(ImplicitlyCopyable, Movable):
 
 
 struct Flow[*Ops: OpLike]:
-    """A chain of operators: a `Read`, then `Map`s, each taking what the one
-    before it makes. See the module docstring."""
+    """A chain of operators: a `Read`, then `Map`s and `MapWith`s, each
+    taking what the one before it makes. See the module docstring."""
 
     comptime Out = Self.Ops[Self.Ops.length - 1].Out
     """What the flow returns: the last operator's results."""
@@ -183,7 +211,8 @@ struct Flow[*Ops: OpLike]:
         """Starts the flow on `inputs`, the read's arguments, and returns the
         run to read with `next`. An input dista loses part of is read again
         up to `retries` times. It raises if an operator's task isn't
-        registered with `rt`, or a `Map`'s isn't a `Task` of one argument.
+        registered with `rt`, or a `Map`'s isn't a `Task` of one argument,
+        or is a `StatefulTask`, which goes in a `MapWith`.
         """
         Self._check()
         if retries < 0:
@@ -195,6 +224,10 @@ struct Flow[*Ops: OpLike]:
                 T.is_stream() or T.is_many() or T.is_actor() or T.arity() != 1
             ):
                 raise Error(T.name(), ": a Map takes a Task of one argument")
+            comptime if Self.Ops[i].KIND == "Map" and conforms_to(
+                T, StatefulLike
+            ):
+                raise Error(T.name(), ": a StatefulTask goes in a MapWith")
         var run = FlowRun[*Self.Ops](inputs^, retries)
         return run^
 
@@ -462,7 +495,7 @@ struct FlowRun[*Ops: OpLike](Movable):
         """The operator as an error names it: its position, kind and task."""
         comptime for i in range(Self.N):
             if op == i:
-                var kind = "Read" if Self.Ops[i].IS_READ else "Map"
+                var kind = Self.Ops[i].KIND
                 # The task's linkage name, without its argument types.
                 var full = Self.Ops[i].Task.name()
                 var paren = full.find("(").or_else(-1)
