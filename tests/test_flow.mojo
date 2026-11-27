@@ -2,19 +2,22 @@
 input and in the read's order, the read stops when the last operator is
 held, an error a task or a stream raises fails the flow and leaves the
 stores empty, and the edge cases: no inputs, an input with no items, and a
-flow run twice.
+flow run twice. A task or a stream that kills its worker once makes its
+input read again, with results still exact, and an input lost on every
+attempt fails the flow after its retries.
 
-The backpressure test's tasks find their directory in `FLOW_TEST_DIR`,
-set before a `Runtime` forks its workers, which inherit it."""
+The tasks that write files find their directory in `FLOW_TEST_DIR`, set
+before a `Runtime` forks its workers, which inherit it."""
 
-from std.os import getenv, makedirs, setenv
+from std.os import getenv, makedirs, setenv, unsetenv
 from std.os.path import exists
 from std.testing import TestSuite, assert_equal, assert_true
 from std.time import perf_counter_ns, sleep
 
 from dista import Emit, Runtime, Task, TaskLike, TaskStream
 from dista.flow import Flow, Map, Read
-from dista.socket import wall_ns
+from dista.loss import is_loss
+from dista.socket import exit_now, wall_ns
 
 comptime ITEMS = 50
 
@@ -93,6 +96,44 @@ def held(x: Int) raises -> String:
     return String("#", x)
 
 
+def _first_time(name: String) raises -> Bool:
+    """Whether this is the first call to ask for `name`: it leaves a file
+    for the next one."""
+    var path = String(_dir(), "/", name)
+    if exists(path):
+        return False
+    with open(path, "w") as f:
+        f.write("1")
+    return True
+
+
+def add_one_dying_once(x: Int) raises -> Int:
+    """`add_one`, but the first call on input 3's item 20 kills its worker."""
+    if x == 3020 and _first_time("died"):
+        exit_now(9)
+    return x + 1
+
+
+def items_dying_once(i: Int, mut out: Emit[Int]) raises:
+    """`items_of`, but input 4's first stream kills its worker once 10 items
+    have reached the head."""
+    for k in range(ITEMS):
+        if i == 4 and k == 10 and _first_time("died"):
+            sleep(0.5)
+            exit_now(9)
+        out.put(i * 1000 + k)
+
+
+def items_dying_on_2(i: Int, mut out: Emit[Int]) raises:
+    """`items_of`, but every stream of input 2 kills its worker once 10
+    items have reached the head."""
+    for k in range(ITEMS):
+        if i == 2 and k == 10:
+            sleep(0.5)
+            exit_now(9)
+        out.put(i * 1000 + k)
+
+
 comptime ItemsOf = TaskStream[Int, Int, items_of]
 comptime CountTo = TaskStream[Int, Int, count_to]
 comptime ItemsOrFail = TaskStream[Int, Int, items_or_fail]
@@ -101,6 +142,9 @@ comptime AddOne = Task[Int, Int, add_one]
 comptime CheckedAddOne = Task[Int, Int, checked_add_one]
 comptime Label = Task[Int, String, label]
 comptime Held = Task[Int, String, held]
+comptime AddOneDyingOnce = Task[Int, Int, add_one_dying_once]
+comptime ItemsDyingOnce = TaskStream[Int, Int, items_dying_once]
+comptime ItemsDyingOn2 = TaskStream[Int, Int, items_dying_on_2]
 
 comptime Labels = Flow[Read[ItemsOf], Map[AddOne], Map[Label]]
 
@@ -114,6 +158,23 @@ def _inputs(n: Int) -> List[Int]:
 
 def _want(i: Int, k: Int) -> String:
     return String("#", i * 1000 + k + 1)
+
+
+def _fresh_dir() raises -> String:
+    """A new directory for this test's files, in `FLOW_TEST_DIR`."""
+    var dir = String(
+        getenv("TMPDIR", "/tmp"), "/dista-test-flow-", perf_counter_ns()
+    )
+    makedirs(dir)
+    _ = setenv("FLOW_TEST_DIR", dir)
+    return dir^
+
+
+def _assert_exact(got: List[String], inputs: Int) raises:
+    assert_equal(len(got), inputs * ITEMS)
+    for i in range(inputs):
+        for k in range(ITEMS):
+            assert_equal(got[i * ITEMS + k], _want(i, k))
 
 
 def _assert_empty[*Ts: TaskLike](mut rt: Runtime[*Ts]) raises:
@@ -216,6 +277,8 @@ def test_a_raising_task_fails_the_flow_and_frees_everything() raises:
     except e:
         again = String(e)
     assert_equal(again, msg)
+    # A raised error isn't a loss: nothing was read again.
+    assert_equal(run.stats().reruns(), 0)
     _assert_empty(rt)
     # The runtime runs another flow.
     assert_equal(len(Labels.run(rt, _inputs(3))), 3 * ITEMS)
@@ -234,6 +297,100 @@ def test_a_raising_read_fails_the_flow_and_frees_everything() raises:
         msg.startswith("operator 0 (Read test_flow::items_or_fail)"), msg
     )
     assert_true(" failed on input 5: read broke on 5" in msg, msg)
+    _assert_empty(rt)
+
+
+def test_loss_errors_are_told_from_raised_ones() raises:
+    assert_true(is_loss("worker lost while running this task"))
+    assert_true(
+        is_loss(
+            "worker lost while running this stream, after some of its items"
+            " were answered"
+        )
+    )
+    assert_true(
+        is_loss(
+            "input failed: result 123 lost: its worker went away, and dista"
+            " doesn't rebuild lost results; run the job again"
+        )
+    )
+    assert_true(is_loss("input lost: the worker holding it (x) went away"))
+    assert_true(is_loss("stream interrupted: the head restarted"))
+    assert_true(not is_loss("cancelled"))
+    assert_true(not is_loss("timed out: ran longer than DISTA_TASK_TIMEOUT"))
+    assert_true(not is_loss("input failed: bad batch 7013"))
+    assert_true(not is_loss("result x lost: its worker went away"))
+
+
+def test_a_map_whose_worker_dies_reads_its_input_again() raises:
+    """With `DISTA_TASK_RETRIES=0` the head doesn't run the killed task
+    again, and fails it with a loss: the flow reads its input again."""
+    _ = _fresh_dir()
+    _ = setenv("DISTA_TASK_RETRIES", "0")
+    var rt = Runtime[ItemsOf, AddOneDyingOnce, Label](workers=6)
+    _ = unsetenv("DISTA_TASK_RETRIES")
+    comptime Dying = Flow[Read[ItemsOf], Map[AddOneDyingOnce], Map[Label]]
+    var run = Dying.start(rt, _inputs(10))
+    var by_input = List[List[String]](length=10, fill=List[String]())
+    while True:
+        var r = run.next(rt)
+        if not r:
+            break
+        var done = r.take()
+        for k in range(len(done.refs)):
+            by_input[done.input].append(rt.take(done.refs[k]))
+    var st = run.stats()
+    print("  ", st)
+    assert_true(st.ops[1].reruns >= 1, String(st))
+    assert_equal(st.inputs_done, 10)
+    var out = List[String]()
+    for i in range(10):
+        out.extend(by_input[i].copy())
+    _assert_exact(out, 10)
+    _assert_empty(rt)
+
+
+def test_a_read_whose_worker_dies_after_some_items_reads_its_input_again() raises:
+    _ = _fresh_dir()
+    var rt = Runtime[ItemsDyingOnce, AddOne, Label](workers=6)
+    comptime Dying = Flow[Read[ItemsDyingOnce], Map[AddOne], Map[Label]]
+    var run = Dying.start(rt, _inputs(10))
+    var by_input = List[List[String]](length=10, fill=List[String]())
+    while True:
+        var r = run.next(rt)
+        if not r:
+            break
+        var done = r.take()
+        for k in range(len(done.refs)):
+            by_input[done.input].append(rt.take(done.refs[k]))
+    var st = run.stats()
+    print("  ", st)
+    assert_equal(st.ops[0].reruns, 1, String(st))
+    assert_equal(st.ops[0].submitted, 11, String(st))
+    var out = List[String]()
+    for i in range(10):
+        out.extend(by_input[i].copy())
+    _assert_exact(out, 10)
+    _assert_empty(rt)
+
+
+def test_an_input_lost_on_every_attempt_fails_after_its_retries() raises:
+    _ = _fresh_dir()
+    var rt = Runtime[ItemsDyingOn2, AddOne, Label](workers=6)
+    comptime Dying = Flow[Read[ItemsDyingOn2], Map[AddOne], Map[Label]]
+    var msg = String()
+    try:
+        _ = Dying.run(rt, _inputs(6), retries=2)
+    except e:
+        msg = String(e)
+    print("  ", msg)
+    assert_true(
+        msg.startswith(
+            "operator 0 (Read test_flow::items_dying_on_2) failed on input 2"
+            " after 3 attempts: worker lost while running this stream"
+        ),
+        msg,
+    )
     _assert_empty(rt)
 
 

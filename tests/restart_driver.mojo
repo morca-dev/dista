@@ -23,6 +23,12 @@ script starts with `DISTA_GROUP=gpu`: both raise if they run anywhere else.
 After the restart the gpu workers rejoin in their group, and the driver
 sends its groups frame before it resends anything, so the gpu tasks and
 the gpu actor's calls, restored from its checkpoint, stay on them.
+
+A flow runs too, `Read[FlowItems]` then `Map[Square]` on 8 inputs, one
+stream at a time, which takes a worker of its own. The driver takes its
+first input before sending the rest, so the next input's stream is open,
+held by its window, when the head restarts. It is interrupted, the flow
+reads that input again, and its results must be exact.
 """
 
 from std.os import getenv
@@ -30,7 +36,8 @@ from std.os.path import exists
 from std.time import sleep
 
 from dista import Actor, Emit, Method, ObjectRef, Runtime, Seq, Task
-from dista import TaskStream
+from dista import TaskLike, TaskStream
+from dista.flow import Flow, FlowRun, Map, Read
 
 
 def blob(n: Int) -> String:
@@ -94,18 +101,31 @@ def count_slowly(n: Int, mut out: Emit[Int]) raises:
         out.put(k)
 
 
+def flow_items(i: Int, mut out: Emit[Int]) raises:
+    for k in range(FLOW_ITEMS):
+        sleep(0.002)
+        out.put(i * 100 + k)
+
+
 comptime Blob = Task[Int, String, blob]
 comptime TotalLength = Task[Seq[String], Int, total_length]
 comptime Square = Task[Int, Int, square]
 comptime CounterActor = Actor[Counter, Int, new_counter]
 comptime SlowAdd = Method[CounterActor, Int, Int, slow_add]
 comptime CountSlowly = TaskStream[Int, Int, count_slowly]
+comptime FlowItems = TaskStream[Int, Int, flow_items]
 comptime GpuSquare = Task[Int, Int, gpu_square, group="gpu"]
 comptime GpuCounter = Actor[Counter, Int, new_gpu_counter, group="gpu"]
 comptime GpuAdd = Method[GpuCounter, Int, Int, gpu_add]
 
 comptime CALLS = 300
 comptime GPU_CALLS = 200
+comptime FLOW_INPUTS = 8
+comptime FLOW_ITEMS = 30
+
+comptime SquaresRead = Read[FlowItems, streams=1, window=4]
+comptime SquaresMap = Map[Square, budget=4]
+comptime Squares = Flow[SquaresRead, SquaresMap]
 
 
 def wait_for_gate() raises:
@@ -120,6 +140,24 @@ def wait_for_gate() raises:
     raise Error("the head was never restarted: no ", gate)
 
 
+def _take_input[
+    *Ts: TaskLike
+](
+    mut rt: Runtime[*Ts],
+    mut flow: FlowRun[SquaresRead, SquaresMap],
+    mut out: List[List[Int]],
+) raises -> Bool:
+    """Takes the flow's next finished input into `out`: False once every
+    input is done."""
+    var r = flow.next(rt)
+    if not r:
+        return False
+    var done = r.take()
+    for k in range(len(done.refs)):
+        out[done.input].append(rt.take(done.refs[k]))
+    return True
+
+
 def main() raises:
     var rt = Runtime[
         Blob,
@@ -131,12 +169,19 @@ def main() raises:
         GpuSquare,
         GpuCounter,
         GpuAdd,
+        FlowItems,
     ](workers=4)
     # Far more items than its window: it can't end before the restart.
     var s = rt.stream[CountSlowly](1_000_000, window=4)
     var items = List[Int]()
     for _ in range(2):
         items.append(rt.take(rt.next(s).value()))
+    var flow_inputs = List[Int]()
+    for i in range(FLOW_INPUTS):
+        flow_inputs.append(i)
+    var flow = Squares.start(rt, flow_inputs^)
+    var flow_out = List[List[Int]](length=FLOW_INPUTS, fill=List[Int]())
+    _ = _take_input(rt, flow, flow_out)
     var counter = rt.create[CounterActor](0, checkpoint_every=50)
     var adds = List[ObjectRef[Int]](capacity=CALLS)
     for _ in range(CALLS):
@@ -173,6 +218,26 @@ def main() raises:
         if items[k] != k:
             raise Error("stream item ", k, " was ", items[k])
     print("stream:", len(items), "items, then", why)
+    while _take_input(rt, flow, flow_out):
+        pass
+    for i in range(FLOW_INPUTS):
+        if len(flow_out[i]) != FLOW_ITEMS:
+            raise Error(
+                "flow input ", i, " gave ", len(flow_out[i]), " results"
+            )
+        for k in range(FLOW_ITEMS):
+            var want = (i * 100 + k) * (i * 100 + k)
+            if flow_out[i][k] != want:
+                raise Error(
+                    "flow input ", i, " item ", k, " was ", flow_out[i][k]
+                )
+    print(
+        "flow:",
+        FLOW_INPUTS * FLOW_ITEMS,
+        "results exact,",
+        flow.stats().reruns(),
+        "inputs read again",
+    )
     var sum = 0
     for r in squares:
         sum += rt.get(r)

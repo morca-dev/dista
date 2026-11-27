@@ -199,6 +199,12 @@ from dista.socket import (
     wall_ns,
 )
 from dista.checkpoint import newest_checkpoint
+from dista.loss import (
+    ACTOR_LOST,
+    INPUT_FAILED,
+    WORKER_LOST,
+    lost_result,
+)
 from dista.metrics import (
     Histogram,
     answer_scrape,
@@ -455,18 +461,6 @@ struct _Queue(Copyable, Movable, Sized):
         var out = self.tasks^
         self.tasks = List[_Task]()
         return out^
-
-
-def _lost_result(obj: UInt64) -> String:
-    """The error for a result whose worker went away with it."""
-    return String(
-        "result ",
-        obj,
-        (
-            " lost: its worker went away, and dista doesn't rebuild lost"
-            " results; run the job again"
-        ),
-    )
 
 
 def _env_int(name: String, default: Int) -> Int:
@@ -2290,9 +2284,7 @@ struct Head(Movable):
             for ref t in calls:
                 if self._roles[best] != ROLE_WORKER:
                     # Lost sending: `_drop` failed the actor; fail the rest.
-                    self._fail(
-                        t.object_id, String("actor lost: its worker went away")
-                    )
+                    self._fail(t.object_id, String(ACTOR_LOST))
                 else:
                     self._send_to(best, t)
             if self._roles[best] == ROLE_WORKER:
@@ -2910,7 +2902,7 @@ struct Head(Movable):
                 _ = self._pop_location(obj)
                 if self._orphans.pop(obj, False):
                     continue
-                self._fail(obj, _lost_result(obj))
+                self._fail(obj, lost_result(obj))
             # The tasks it was running run again elsewhere, up to
             # `_max_retries` times, unless an input they read from a worker
             # is gone too.
@@ -2933,7 +2925,7 @@ struct Head(Movable):
                         self._retried += 1
                         continue
                     except:
-                        why = String("worker lost while running this task")
+                        why = String(WORKER_LOST, "task")
                 # A `TaskMany`'s worker answers its first result last, so
                 # it's in flight until every result is answered.
                 var parts = self._many.pop(obj, 1)
@@ -3309,10 +3301,11 @@ struct Head(Movable):
         again: "" if it can."""
         var tries = self._tries.get(obj, 0)
         if obj not in self._running:
-            return String("worker lost while running this task")
+            return String(WORKER_LOST, "task")
         if tries > self._max_retries:
             return String(
-                "worker lost while running this task, ",
+                WORKER_LOST,
+                "task, ",
                 tries,
                 " times (DISTA_TASK_RETRIES is ",
                 self._max_retries,
@@ -3321,25 +3314,23 @@ struct Head(Movable):
         for d in self._deps_of.get(obj, List[UInt64]()):
             if d in self._errors:
                 return String(
-                    (
-                        "worker lost while running this task, and an input with"
-                        " it: "
-                    ),
+                    WORKER_LOST,
+                    "task, and an input with it: ",
                     self._errors.get(d, String()),
                 )
         var parts = self._many.get(obj, 1)
         for k in range(1, parts):
             if self._answered(obj + UInt64(k)):
                 return String(
-                    "worker lost while running this task, after some of its"
-                    " results were answered"
+                    WORKER_LOST,
+                    "task, after some of its results were answered",
                 )
         if self._streams.get(obj, 0) > 0:
             # Its driver may have read those: running it again would make
             # them twice.
             return String(
-                "worker lost while running this stream, after some of its"
-                " items were answered"
+                WORKER_LOST,
+                "stream, after some of its items were answered",
             )
         return String()
 
@@ -3419,7 +3410,7 @@ struct Head(Movable):
             _ = self._unsettled.pop(id, 0)
             self._waiting_bytes -= len(t.args)
             if failed:
-                self._fail_all(id, String("input failed: ", failed))
+                self._fail_all(id, String(INPUT_FAILED, failed))
             elif not remote:
                 # A `TaskMany` runs on its number of results, then the input.
                 var args = List[UInt8]()
@@ -3741,9 +3732,7 @@ struct Head(Movable):
                 var failed = self._input_failed(t)
                 if failed:
                     _ = self._inflight[i].pop()
-                    self._fail_all(
-                        t.object_id, String("input failed: ", failed)
-                    )
+                    self._fail_all(t.object_id, String(INPUT_FAILED, failed))
                     continue
                 var obj = t.object_id
                 self._tries[obj] = self._tries.get(obj, 0) + 1

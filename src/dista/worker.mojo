@@ -119,6 +119,7 @@ from dista.checkpoint import (
 from dista.client import TaskContext, peer_connect_timeout_ms
 from dista.executors import DispatchFn, Executors, Job, worker_slots
 from dista.stream import StreamSink
+from dista.loss import HEAD_LOST, INPUT_LOST
 from dista.metrics import (
     Histogram,
     answer_scrape,
@@ -1313,7 +1314,7 @@ struct Worker[
                 var parts = max(p.many, 1)
                 for k in range(parts):
                     self._report_error(
-                        first + UInt64(k), String("input lost: ", failed)
+                        first + UInt64(k), String(INPUT_LOST, failed)
                     )
                 continue
             if not complete:
@@ -1842,7 +1843,7 @@ struct Worker[
         except e:
             for k in range(parts):
                 self._report_error(
-                    t.object_id + UInt64(k), String("input lost: ", e)
+                    t.object_id + UInt64(k), String(INPUT_LOST, e)
                 )
             return False
         return True
@@ -2187,9 +2188,7 @@ struct Worker[
             if self._window == 0 or put - self._taken < self._window:
                 return
             if self._head.closed:
-                raise Error(
-                    "the head went away while this stream waited for its reader"
-                )
+                raise Error(HEAD_LOST)
             if self._draining and wall_ns() >= self._deadline:
                 raise Error(
                     "DISTA_DRAIN_SECONDS passed while this stream waited for"
