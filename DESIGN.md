@@ -621,11 +621,118 @@ stream in `tests/chaos.sh`'s workload). What differs from the plan:
 | 2 | **The window and cancelling**: credit, `put` blocking both ways, `rt.cancel(s)` and a departed driver raising in `put`. | A stream of 10,000 items of 1 MB read at 50 a second keeps its worker under a fixed size; an unread stream stops at `window` items; a one-slot worker serves a fetch while its stream is blocked; a cancelled stream's task ends within a second. | ~600 |
 | 3 | **Failures**: the retry rule, drain, head restart, the `STREAM` flag on task-after, the fuzzers' and `chaos.sh`'s share. Done. | A worker killed before the first item: the stream completes elsewhere. Killed after: the end fails as above. `tests/drain.sh` with a stream running. | ~500 |
 
-### Defaults to confirm
+### Defaults (confirmed 2026-11-26)
 
-| Default | Proposed | Alternative |
+| Default | Chosen | Alternative |
 |---|---|---|
 | Window | 16 items | Ray's is unbounded unless set |
 | What gives credit | `next` returning the item | releasing it, which bounds what's held and not only what's unread |
 | Most items | 2^20 a stream | a second ID range asked of the head when the first runs out |
 | A stream cut by a head restart | fails | the driver resubmits and skips the items it took, which needs tasks to emit the same items in the same order |
+
+## Worker groups (plan, 2026-11-26)
+
+Every worker of a job is the same to the head: a task goes to whichever has
+room. A job with a model on a GPU can't say that the model runs on the GPU
+workers and the decoding on the others. This is the third step of morca's
+[docs/layers.md](https://github.com/morca-dev/morca/blob/main/docs/layers.md),
+and what `dista.flow` needs to put an operator on the machines it was sized
+for.
+
+```mojo
+comptime Tokenize = Task[String, Tokens, tokenize]                   # no group
+comptime Encoder = Actor[Model, String, load_model, group="gpu"]     # only on gpu workers
+comptime Embed = Method[Encoder, Tokens, Vectors, embed]             # runs where its actor is
+```
+
+```sh
+DISTA_ROLE=worker DISTA_GROUP=gpu DISTA_HEAD=head:7100 ./job    # a worker of group gpu
+```
+
+Ray counts CPUs, GPUs and custom resources per task and per node. Here
+whatever started a worker already sized it (its slots and memory come from
+its grant), so the head only routes by a name.
+
+### What a group is
+
+- **A name, one per worker.** `DISTA_GROUP` names a worker's group: 1 to 32
+  bytes of lowercase letters, digits, `-` and `_`. A worker without one is
+  in the group with the empty name. The head only compares names: what
+  `gpu` means is between the job and whatever starts its workers.
+- **A task's group is part of its type.** `Task`, `Task2`, `Task3`,
+  `TaskWith`, `TaskMany`, `TaskStream` and `Actor` take `group=`, and
+  `TaskLike` gets `group()`. So a task's group is fixed where it's declared,
+  like its function, and the same function can't be in two groups (its wire
+  ID is its function's name; the registry check refuses the second).
+- **Exact match.** A task runs only on a worker of its group, and an actor
+  is placed only on one. A task with no group runs only on workers with no
+  group, so it never takes a GPU worker's slot. A method runs where its
+  actor is and has no group of its own.
+- **Everything else is as before, within the group**: slots, capacity,
+  the pipeline, placement by data location, retries after a lost worker
+  (on another worker of the group). Results are not grouped: any worker
+  fetches from any other, and a draining worker's results move to any
+  worker.
+
+### On the wire
+
+- **The hello.** A worker with a group sends its slots (even when 1) and
+  then its group: a length byte and the name. A worker without one sends
+  the hello it sends today, so a head from before groups still takes it.
+- **A table, not a field per task.** The head is generic and doesn't know a
+  program's tasks, so a driver whose registry has a group sends one frame
+  after its welcome: kind 39, groups, a count and per task its ID and its
+  group's name. The head keeps it per driver and looks a task's group up
+  when it queues it. Task frames don't change. A resuming driver sends it
+  again before its replay. A task's own client (`CtxTask`) sends it too.
+- **Mixed versions.** A program with no group sends nothing new. One with
+  groups needs a head that knows kind 39 and the longer hello; an older
+  head drops the peer, as for any kind it doesn't know.
+
+### With no worker of the group
+
+- **A cluster waits.** The task stays queued and shows as demand for its
+  group, which is how a pool learns to grow it. `dista status` shows a
+  group with tasks and no workers.
+- **Local mode fails at once**, with `no worker of group gpu`, since nobody
+  will add one. `Runtime(workers=4, groups="gpu=1")` forks one more worker
+  in group `gpu` beside the four with none, so a job with groups runs and
+  is tested on one machine.
+- **Draining.** The head refuses to drain the last worker of a group while
+  tasks of that group are queued, as it does today for the last worker. An
+  actor moves only to a worker of its group.
+
+### Demand per group
+
+- **`dista status --json`** gives each worker's `group`, and a `groups`
+  list: per group its workers, slots, tasks ready, tasks running and actors
+  waiting. The counts at the top stay, as totals. The head's `/metrics`
+  gets the same gauges with a `group` label.
+- **`dista.scale`**: `demand.of(group)` is the demand of one group, in the
+  shape `decide` takes today, so a provider calls `decide` once per group
+  with that group's policy. `dista scale --once --group gpu` prints one.
+  `decide` itself doesn't change.
+
+### Not in this plan
+
+- **Several groups per worker**, or labels matched by expressions.
+- **A group chosen per call** (`rt.remote[T](x, group=...)`).
+- **Counted resources** (half a GPU, 4 CPUs a task).
+- **Tasks that run anywhere** when they name no group.
+
+### PRs
+
+| # | PR | Gate | Size |
+|---|---|---|---|
+| 1 | **Groups for tasks**: `DISTA_GROUP` and the hello, `group=` on the task types, the groups frame, dispatch by group, local mode's `groups=`, the group in `dista status`. | `tests/test_groups.mojo`: of 200 tasks in two groups, each runs on a worker of its group (it returns its worker's group); tasks with no group never run on a grouped worker; a `TaskMany` and a stream keep to their group; a task of a group with no worker fails at once in local mode; a worker killed mid-run has its tasks run again inside the group. A program without groups sends the bytes it sent before. | ~600 |
+| 2 | **Actors and failures**: placement by group, restore and move on a drain inside the group, the drain refusals, a head restart (workers rejoin with their group, the table is sent again), the fuzzers' share. | An actor with `group="gpu"` is built on the gpu worker with three others idle; with two gpu workers, a drained one's actor moves to the other; `tests/head_restart.sh` with a grouped task and actor. | ~400 |
+| 3 | **Demand per group**: `status --json`, `/metrics`, `demand.of`, `dista scale --group`. | `tests/autoscale.sh` with two groups: tasks of group `b` queued grow `b` alone, and it drains back alone. | ~400 |
+
+### Defaults to confirm
+
+| Default | Proposed | Alternative |
+|---|---|---|
+| Where a task's group is given | on its type (`group=`) | per call, or both |
+| A task with no group | runs only on workers with no group | runs on any worker, as Ray's tasks without a GPU do |
+| Groups per worker | one | several, or labels |
+| No worker of the group | a cluster waits, local mode fails | a cluster fails after a timeout |
