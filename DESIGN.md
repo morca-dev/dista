@@ -763,3 +763,182 @@ its grant), so the head only routes by a name.
 | A task with no group | runs only on workers with no group | runs on any worker, as Ray's tasks without a GPU do |
 | Groups per worker | one | several, or labels |
 | No worker of the group | a cluster waits, local mode fails | a cluster fails after a timeout |
+
+## Flows (plan, 2026-11-26)
+
+A job that puts a dataset through several stages is written by hand today:
+the taxi and shuffle jobs submit every task and hold every ref themselves,
+and nothing bounds what is in flight. `dista.flow` is a library for that: a
+chain of operators over batches, run by an executor in the driver, in
+memory that doesn't grow with the dataset. This is step 3 of morca's
+[docs/layers.md](https://github.com/morca-dev/morca/blob/main/docs/layers.md),
+and it is built on what steps 1 and 2 added: `rt.wait`, streams and groups.
+
+```mojo
+from dista import Runtime, StatefulTask, Task, TaskStream
+from dista.flow import Flow, Map, MapWith, Read
+
+comptime ScanFile = TaskStream[String, RecordBatch, scan_file]       # one file, batch by batch
+comptime Tokenize = Task[RecordBatch, RecordBatch, tokenize]
+comptime Encode = StatefulTask[Model, RecordBatch, RecordBatch, load_model, encode, group="gpu"]
+comptime Append = Task[RecordBatch, String, append_file]             # returns the file it wrote
+
+comptime Embed = Flow[Read[ScanFile], Map[Tokenize], MapWith[Encode], Map[Append]]
+
+var rt = Runtime[ScanFile, Tokenize, Encode, Append](workers=6, groups="gpu=1")
+var files = Embed.run(rt, paths)        # a List[String]: every file written
+```
+
+### What a flow is
+
+- **Operators are task types.** `Read[T]` takes a `TaskStream`, `Map[T]` a
+  `Task` and `MapWith[T]` a `StatefulTask` (below). The tasks are declared
+  as any task is, and listed in `Runtime[...]` as well: a flow whose task
+  isn't registered raises when it starts. morca's sketch gave operators
+  bare functions (`Map[tokenize]`), which Mojo can't type: a task's
+  declaration is where its result type is written.
+- **The chain is checked at compile time.** Each operator has an input and
+  an output type, and `Flow` asserts that each one's input is the output of
+  the one before: a chain out of order fails to compile with `an operator's
+  input must be the output of the one before it`. The first operator is a
+  `Read`.
+- **A flow takes a list of inputs**, the first operator's arguments: file
+  names, key ranges, partitions. Each input is read by one stream, and
+  everything made from it is tracked as that input's.
+- **The last operator's results are the flow's.** `Flow.run(rt, inputs)`
+  returns them all as values, by input and then in the read's order.
+  `Flow.start(rt, inputs)` returns a `FlowRun`, and `run.next(rt)` returns
+  one finished input at a time, its position and the refs of its results,
+  or nothing once every input is done.
+- **A sink is a `Map`** whose task writes and returns what it wrote. A
+  flow's results are held until their input is done (see "Failures"), so
+  the last operator should return something small.
+
+*Verified* on the 1.3 nightly: a `Flow[*Ops]` over a pack of operator
+types, the compile-time check between neighbours with its message, an
+operator chosen by a runtime index through a `comptime for`, and tasks and
+streams submitted on object IDs, since refs of several result types can't
+share a `List`.
+
+### The executor
+
+It runs in the driver, on its one thread, inside `run` and `next`. It keeps
+only object IDs: per operator, the tasks in flight and the results finished
+but not yet taken by the next operator.
+
+- **Each operator has a budget** (`Map[T, budget=16]`): its tasks in flight
+  plus its finished results the next operator hasn't taken. An operator at
+  its budget is given nothing more.
+- **A step of the loop** goes from the last operator to the first: while an
+  operator has room and the one before it has a finished result, it submits
+  its task on that ref. It then waits, with `rt.wait` on IDs, for any task
+  in flight or any stream's next item or end.
+- **A full operator stops the one before it, back to the read.** A `Read`
+  runs up to `streams` inputs at once (default 4), each a stream with a
+  `window` (default 16). The executor calls `rt.next` on a stream only when
+  the next operator has room, so the stream's `put` blocks on its window,
+  which is the backpressure streams were built to give.
+- **Peak objects** are therefore `streams × window` plus the sum of the
+  budgets, whatever the dataset's size. Budgets count batches, not bytes,
+  as the window does: a read that makes batches of a bounded size bounds
+  the memory.
+- **An input is released as soon as its consumer is submitted.** The head
+  keeps it while that task needs it, a retry included (the driver already
+  holds back a release its own unsettled task depends on).
+- **Batches are processed in any order**, whichever finishes first. Each
+  carries its input's position and its item's, so an input's results are
+  handed out in the read's order.
+- **Nothing moves between calls.** Workers finish what they were sent while
+  the caller is busy between two `next`s, and the executor submits more at
+  the next one.
+
+### State on a worker
+
+The model is loaded once per worker and used by every batch. morca's
+document proposed a pool of actors for that. This plan proposes a task with
+state instead, and the choice is the first default to confirm.
+
+```mojo
+def load_model() raises -> Model: ...
+def encode(mut m: Model, batch: RecordBatch) raises -> RecordBatch: ...
+
+comptime Encode = StatefulTask[Model, RecordBatch, RecordBatch, load_model, encode, group="gpu"]
+```
+
+- **A `StatefulTask` is a task whose function also gets a state**, which
+  its worker builds with `new` before the first call it runs, and keeps
+  until it exits. It is submitted, routed by group, retried and given refs
+  as any task is. Nothing changes at the head or on the wire.
+- **The state is a cache, not a record.** Nothing saves it, and a call can
+  land on any worker of the group, so the function mustn't depend on which
+  calls came before. A model, a tokenizer or a connection fits. A counter
+  doesn't, and stays an actor.
+- **One state per worker process.** On a worker with several slots its
+  calls run one at a time, behind a lock; the worker's other tasks still
+  run beside them.
+- **`new` takes no argument.** It reads what it needs (a model's name) from
+  the program or the environment, which every process of a job shares.
+- **The pool is the group.** How many workers hold the model is how many
+  workers the group has, and demand per group (`dista scale --group`) is
+  what grows it. The flow has no pool to size.
+
+Why not actors, which exist:
+
+| | An actor pool | A task with state |
+|---|---|---|
+| A batch as the argument | `rt.call` takes values only; calls on refs would be new at the head, the worker and in every replay | a task takes refs today |
+| A worker lost | the head and each caller keep every call until a checkpoint covers it, and replay them; without checkpoints a loss late in a long flow replays the flow | its tasks in flight run again |
+| Sizing | the executor creates and kills actors, beside the fleet scaling the group | the fleet alone |
+| A worker | serves one actor and nothing else | runs any task of its group |
+
+### Failures
+
+- **A task whose worker dies runs again**, as any task does, up to
+  `DISTA_TASK_RETRIES` times.
+- **An error the function raised fails the flow**: the executor cancels what
+  is in flight, releases what it holds, and `next` raises the error with
+  the operator and the input it came from.
+- **A loss dista reports reruns the input.** A result lost with its worker,
+  a stream whose worker went after an item was answered, and a stream
+  interrupted by a head restart all fail today, since dista doesn't rebuild
+  results. The executor does what the head can't: it cancels everything
+  made from that input, drops the results it held for it, and reads the
+  input again, up to `retries` times (default 3). The input is the unit of
+  retry, because a stream can't resume in its middle.
+- **Results are handed out per input, once the input is done**, so a rerun
+  never shows a result twice and the output is exact. What a rerun does
+  repeat is side effects: a sink that wrote files leaves the first
+  attempt's behind, unnamed in the results. A caller that commits the
+  names it was given, as an Iceberg append does, commits each input once.
+- **The cost of a loss is its inputs**, so inputs should be small: files or
+  row-group ranges, not the whole dataset as one.
+
+### Not in this plan
+
+- **Operators that aren't one-to-one after the read**: a flat map, a
+  filter that drops batches, rebatching to a size, a union, a join.
+- **Shuffles inside a flow** (sort, group by, repartition): `TaskMany`
+  stays the way to write one.
+- **Budgets in bytes.**
+- **A flow across steps**, or one that checkpoints: it runs inside a morca
+  step, and the step is what repeats.
+- **An operator's degree set from the cluster's size**: budgets are fixed
+  numbers.
+
+### PRs
+
+| # | PR | Gate | Size |
+|---|---|---|---|
+| 1 | **The flow and its executor**: `dista.flow` with `Read`, `Map`, `Flow`, `FlowRun`; budgets and backpressure; results per input in the read's order; a function's error cancels the flow. | `tests/test_flow.mojo` in local mode: 40 inputs of 50 batches through three operators give exact results in order; with the last operator held, the read stops within `streams × window` plus the budgets (the tasks count what they made); a raising task fails the flow and leaves the stores empty; a chain out of order is a `tests/compile_fail` case. | ~900 |
+| 2 | **State on a worker**: `StatefulTask` in the core, `MapWith` in the flow. | `new` runs once per worker however many batches it serves; with `groups="gpu=2"` every `MapWith` batch runs on a gpu worker, and a killed one's batches finish on the other after it builds its own state; on a worker with 4 slots no two calls overlap. | ~500 |
+| 3 | **Rerun by input**: loss errors told from raised ones, the rerun, `retries`, counters per operator (`run.stats()`: submitted, finished, in flight, reruns). | `tests/flow_loss.sh`: a worker holding finished batches is killed mid-flow and the results are exact, with at least one rerun counted; `tests/head_restart.sh` with a flow running: it finishes exact. | ~700 |
+
+### Defaults to confirm
+
+| Default | Proposed | Alternative |
+|---|---|---|
+| Where the model lives | a `StatefulTask`: state per worker, scaled with its group | a pool of actors run by the executor, as morca's document says; it needs calls on refs and actors that don't replay |
+| A lost batch | its input is read again, and results are handed out per finished input | the flow fails and the morca step repeats; results could then come one by one |
+| Order of results | inputs as they finish, each input's results in the read's order | every result in input order (slower: one slow input holds the rest), or any order |
+| Budgets | in batches: 16 per operator, 4 streams of window 16 per read | in bytes |
+| Operators in the first version | `Read` first, then `Map` and `MapWith`, all one-to-one | a flat map and a filter from the start |
