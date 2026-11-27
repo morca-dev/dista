@@ -97,7 +97,12 @@ worker takes tasks only from its own program's and group's queue. Slots,
 capacity, placement by data location and retries all work within a group.
 A cluster keeps a task of a group with no worker queued; local mode, where
 nobody adds one, fails it at once, as it fails every queued task once all
-its workers have gone.
+its workers have gone. An actor's group works the same way: it's placed,
+restored after a lost worker, and moved off a draining one only onto a
+worker of its group, and in local mode one of a group with no worker left
+fails. `dista drain` refuses the last worker of a group while tasks of that
+group are queued, waiting or running; a draining worker's actor with no
+other worker of its group to go to waits, restored once one joins.
 
 An actor is placed on a worker that hosts no other and runs no stream, the
 one with the fewest tasks in flight, as soon as it's created; the worker builds it once those
@@ -343,11 +348,19 @@ struct _Actor(Copyable, Movable):
     var moving: Int
     """While its worker drains: the calls the checkpoint it moves from
     covers, with later calls held in `pending`; -1 otherwise."""
+    var group: String
+    """The worker group it's placed in, from its driver's groups frame; ""
+    for none."""
 
     def __init__(
-        out self, type_id: UInt64, var args: List[UInt8], every: Int = 0
+        out self,
+        type_id: UInt64,
+        var args: List[UInt8],
+        every: Int = 0,
+        var group: String = String(),
     ):
         self.type_id = type_id
+        self.group = group^
         self.args = args^
         self.worker = -1
         self.pending = List[_Task]()
@@ -1256,24 +1269,47 @@ struct Head(Movable):
         server is at `addr`, as a SIGTERM would; "" if it did, else why not.
         """
         var found = -1
-        var others = 0
         for i in range(len(self._roles)):
-            if self._roles[i] != ROLE_WORKER:
-                continue
-            if self._addr(i) == addr:
+            if self._roles[i] == ROLE_WORKER and self._addr(i) == addr:
                 found = i
-            elif self._draining[i] == _DRAIN_NO:
-                others += 1
         if found < 0:
             return String("no worker at ", addr)
         if self._draining[found] != _DRAIN_NO:
             return ""
-        var work = self._queued() + len(self._waiting) + len(self._running)
+        # The last worker of its group, with tasks of that group to run. An
+        # actor doesn't hold it: it moves, or waits for a worker of its
+        # group to join, restored from the checkpoint it moved from.
+        var g = self._group[found].copy()
+        var others = 0
+        var grouped = False
+        for i in range(len(self._roles)):
+            if self._roles[i] != ROLE_WORKER or i == found:
+                continue
+            grouped = grouped or self._group[i] != ""
+            if self._draining[i] == _DRAIN_NO and self._group[i] == g:
+                others += 1
+        var work = 0
+        for entry in self._queues.items():
+            if self._key_group.get(entry.key, String()) == g:
+                work += len(entry.value)
+        for entry in self._waiting.items():
+            if self._group_of(entry.value) == g:
+                work += 1
+        for entry in self._running.items():
+            if self._group_of(entry.value) == g:
+                work += 1
         if others == 0 and work > 0:
+            var which = String("the last worker")
+            if g != "":
+                which = String("the last worker of group ", g)
+            elif grouped:
+                which = String("the last worker without a group")
             return String(
                 "not draining ",
                 addr,
-                ": it's the last worker and ",
+                ": it's ",
+                which,
+                " and ",
                 work,
                 " tasks are queued or running",
             )
@@ -1632,7 +1668,10 @@ struct Head(Movable):
                 self._hold(a)
                 self._open_span(a, type_id)
                 self._actors[a] = _Actor(
-                    type_id, List[UInt8](f.payload[8:]), every
+                    type_id,
+                    List[UInt8](f.payload[8:]),
+                    every,
+                    self._group_of_id(owner_of(a), type_id),
                 )
                 if owner_of(a) in self._resuming:
                     self._resume_actor(a)
@@ -2066,19 +2105,24 @@ struct Head(Movable):
 
     def _place(mut self) raises:
         """Gives each waiting actor a worker of its own, built from the same
-        program, while there are any."""
+        program and in the actor's group, while there are any. In local mode
+        an actor of a group no worker is left in fails."""
         var waiting = self._unplaced^
         self._unplaced = List[UInt64]()
         var still = List[UInt64]()
         for a in waiting:
             if a not in self._actors:
                 continue  # killed before it was placed
-            var h = self._hash_of(a)
+            var why = self._unserved(self._actors[a].group)
+            if why:
+                self._fail_actor(a, why)
+                continue
+            var key = queue_key(self._hash_of(a), self._actors[a].group)
             var best = -1
             for i in range(len(self._conns)):
                 if self._roles[i] != ROLE_WORKER or self._hosting[i] != 0:
                     continue
-                if self._hashes[i] != h or self._draining[i] != _DRAIN_NO:
+                if self._wkey[i] != key or self._draining[i] != _DRAIN_NO:
                     continue
                 if self._streams_on(i) > 0:
                     # The actor would wait for the stream to end, which may
@@ -2121,6 +2165,26 @@ struct Head(Movable):
         # Restarts queued while placing go after the ones still waiting.
         still.extend(self._unplaced^)
         self._unplaced = still^
+
+    def _fail_actor(mut self, a: UInt64, why: String) raises:
+        """Fails unplaced actor `a` for good: its create, unless answered
+        before a restart, and every call waiting for it."""
+        ref act = self._actors[a]
+        act.failed = why.copy()
+        var calls = act.pending.copy()
+        act.pending.clear()
+        var waiters = act.waiters.copy()
+        act.waiters.clear()
+        var killed = act.killed
+        if not self._answered(a):
+            self._fail(a, why.copy())
+        for ref t in calls:
+            if not self._answered(t.object_id):
+                self._fail(t.object_id, why.copy())
+        for ref w in waiters:
+            self._fail(w.object_id, why.copy())
+        if killed:
+            self._kill(a)
 
     def _kill(mut self, a: UInt64) raises:
         """Destroys actor `a` and frees its worker; its driver's done with it.
@@ -3063,38 +3127,45 @@ struct Head(Movable):
         for entry in self._queues.items():
             if len(entry.value) == 0:
                 continue
-            var g = self._key_group.get(entry.key, String())
-            if self._lost_in.get(g, 0) >= self._local_groups.get(g, 0):
+            if self._unserved(self._key_group.get(entry.key, String())):
                 dead.append(entry.key)
         for h in dead:
-            var g = self._key_group.get(h, String())
-            var why: String
-            if self._local_groups.get(g, 0) == 0:
-                if g == "":
-                    why = String(
-                        "no worker without a group: every local worker is in"
-                        " one (Runtime(workers=...))"
-                    )
-                else:
-                    why = String(
-                        "no worker of group ",
-                        g,
-                        ': local mode started none (Runtime(groups="',
-                        g,
-                        '=1"))',
-                    )
-            elif g == "":
-                why = String(
-                    "no workers left without a group: every local worker"
-                    " without one went away"
+            self._fail_queue(
+                h, self._unserved(self._key_group.get(h, String()))
+            )
+
+    def _unserved(self, g: String) -> String:
+        """In local mode, why nothing of group `g` can run: no forked worker
+        is in it, or every one has gone. "" if one is left, or in a cluster,
+        where one may join."""
+        if self._local_workers == 0:
+            return String()
+        var started = self._local_groups.get(g, 0)
+        if self._lost_in.get(g, 0) < started:
+            return String()
+        if started == 0:
+            if g == "":
+                return String(
+                    "no worker without a group: every local worker is in"
+                    " one (Runtime(workers=...))"
                 )
-            else:
-                why = String(
-                    "no worker of group ",
-                    g,
-                    " left: every local worker of it went away",
-                )
-            self._fail_queue(h, why)
+            return String(
+                "no worker of group ",
+                g,
+                ': local mode started none (Runtime(groups="',
+                g,
+                '=1"))',
+            )
+        if g == "":
+            return String(
+                "no workers left without a group: every local worker"
+                " without one went away"
+            )
+        return String(
+            "no worker of group ",
+            g,
+            " left: every local worker of it went away",
+        )
 
     def _why_not_retry(self, obj: UInt64) -> String:
         """Why the task making `obj`, whose worker went away, can't run
@@ -3319,11 +3390,14 @@ struct Head(Movable):
 
     def _group_of(self, t: _Task) -> String:
         """The group task `t` runs in, from its driver's groups frame."""
-        var d = owner_of(t.object_id)
+        return self._group_of_id(owner_of(t.object_id), t.task_id)
+
+    def _group_of_id(self, d: UInt64, task_id: UInt64) -> String:
+        """The group driver `d`'s task or actor type `task_id` is in."""
         if d not in self._groups:
             return String()
         try:
-            return self._groups[d].get(t.task_id, String())
+            return self._groups[d].get(task_id, String())
         except:
             return String()
 

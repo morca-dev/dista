@@ -4,7 +4,10 @@ Each input is a fresh head with one driver and one worker connected over
 socket pairs, both past their hello. The rest of the input is a script of
 frames, each sent by one of the two, or a disconnect. When the first byte
 has bit 2 set, the worker is in group `g` and the driver's groups frame puts
-tasks 1 and 2 in it; the script's random kinds include groups frames too.
+tasks 1 and 2 in it, and task 3 in `h`, which no worker is in; the script's
+random kinds include groups frames too. A task type is an actor's too, so
+actors of each group are created, and each must be placed only on a worker
+of its own group.
 The frames are random kinds, object
 IDs from a small range (so they collide with submitted tasks), random
 payloads. A frame the head rejects drops that peer, as the real loop does.
@@ -61,6 +64,8 @@ def _check(head: Head) raises:
             raise Error("assertion failed: the call log lost or kept a call")
         if act.saved > act.calls:
             raise Error("assertion failed: a checkpoint covers unmade calls")
+        if w >= 0 and not act.failed and head._group[w] != act.group:
+            raise Error("assertion failed: an actor placed outside its group")
     for i in range(len(head._hosting)):
         if head._hosting[i] != 0 and head._hosting[i] not in head._actors:
             raise Error("assertion failed: worker hosts a gone actor")
@@ -92,7 +97,9 @@ def target(data: List[UInt8]) raises:
     var group = String()
     if len(data) > 0 and (data[0] & 4) != 0:
         group = "g"
-        var table = encode_groups([UInt64(1), UInt64(2)], ["g", "g"])
+        var table = encode_groups(
+            [UInt64(1), UInt64(2), UInt64(3)], ["g", "g", "h"]
+        )
         head._handle(conn[DRIVER], Frame(KIND_GROUPS, 0, 0, table^))
     hello = worker_hello(HASH, [127, 0, 0, 1], 7000, 1, group)
     head._handle(conn[WORKER], Frame(KIND_HELLO, 0, 0, hello^))
@@ -234,6 +241,13 @@ def main() raises:
     third.extend([UInt8(0), 32, 1, 0, 0])
     third.extend([UInt8(1), 2, 1, 0, 1, 1])
     seeds.append(third^)
+    # Groups on (bit 2): actors (19) of type 1, in g, of type 0, in none,
+    # and of type 3, in h; then a call (20) to the first.
+    var fourth: List[UInt8] = [4, 19, 1, 1, 8, 0, 0, 0, 0, 0, 0, 0, 0]
+    fourth.extend([UInt8(0), 19, 3, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0])
+    fourth.extend([UInt8(0), 19, 4, 3, 8, 0, 0, 0, 0, 0, 0, 0, 0])
+    fourth.extend([UInt8(0), 20, 2, 1, 8, 1, 0, 0, 0, 0, 1, 0, 0])
+    seeds.append(fourth^)
     fuzz(
         target,
         FuzzConfig(

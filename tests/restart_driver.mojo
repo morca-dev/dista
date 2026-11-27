@@ -16,6 +16,12 @@ the rest. Its window then holds it, unfinished, through the restart: after
 it, `next` returns the items that had come and then fails with "stream
 interrupted: the head restarted", since the driver doesn't send a stream
 again. The items it returned must be right.
+
+A task and an actor of group gpu run beside them, on the two workers the
+script starts with `DISTA_GROUP=gpu`: both raise if they run anywhere else.
+After the restart the gpu workers rejoin in their group, and the driver
+sends its groups frame before it resends anything, so the gpu tasks and
+the gpu actor's calls, restored from its checkpoint, stay on them.
 """
 
 from std.os import getenv
@@ -58,6 +64,29 @@ def slow_add(mut c: Counter, n: Int) -> Int:
     return c.total
 
 
+def _on_gpu() raises:
+    if getenv("DISTA_GROUP") != "gpu":
+        raise Error("ran outside group gpu")
+
+
+def gpu_square(x: Int) raises -> Int:
+    _on_gpu()
+    sleep(0.01)
+    return x * x
+
+
+def new_gpu_counter(start: Int) raises -> Counter:
+    _on_gpu()
+    return Counter(start)
+
+
+def gpu_add(mut c: Counter, n: Int) raises -> Int:
+    _on_gpu()
+    sleep(0.01)
+    c.total += n
+    return c.total
+
+
 def count_slowly(n: Int, mut out: Emit[Int]) raises:
     for k in range(n):
         sleep(0.001)
@@ -70,8 +99,12 @@ comptime Square = Task[Int, Int, square]
 comptime CounterActor = Actor[Counter, Int, new_counter]
 comptime SlowAdd = Method[CounterActor, Int, Int, slow_add]
 comptime CountSlowly = TaskStream[Int, Int, count_slowly]
+comptime GpuSquare = Task[Int, Int, gpu_square, group="gpu"]
+comptime GpuCounter = Actor[Counter, Int, new_gpu_counter, group="gpu"]
+comptime GpuAdd = Method[GpuCounter, Int, Int, gpu_add]
 
 comptime CALLS = 300
+comptime GPU_CALLS = 200
 
 
 def wait_for_gate() raises:
@@ -88,7 +121,15 @@ def wait_for_gate() raises:
 
 def main() raises:
     var rt = Runtime[
-        Blob, TotalLength, Square, CounterActor, SlowAdd, CountSlowly
+        Blob,
+        TotalLength,
+        Square,
+        CounterActor,
+        SlowAdd,
+        CountSlowly,
+        GpuSquare,
+        GpuCounter,
+        GpuAdd,
     ](workers=4)
     # Far more items than its window: it can't end before the restart.
     var s = rt.stream[CountSlowly](1_000_000, window=4)
@@ -99,6 +140,13 @@ def main() raises:
     var adds = List[ObjectRef[Int]](capacity=CALLS)
     for _ in range(CALLS):
         adds.append(rt.call[SlowAdd](counter, 1))
+    var gpu_counter = rt.create[GpuCounter](0, checkpoint_every=50)
+    var gpu_adds = List[ObjectRef[Int]](capacity=GPU_CALLS)
+    for _ in range(GPU_CALLS):
+        gpu_adds.append(rt.call[GpuAdd](gpu_counter, 1))
+    var gpu_squares = List[ObjectRef[Int]]()
+    for i in range(100):
+        gpu_squares.append(rt.remote[GpuSquare](i))
     var maps = List[ObjectRef[String]]()
     for i in range(400):
         maps.append(rt.remote[Blob](100_000 + i))
@@ -130,4 +178,24 @@ def main() raises:
             raise Error("call ", i, " answered ", got, ", expected ", i + 1)
     var count = rt.get(rt.call[SlowAdd](counter, 0))
     rt.kill(counter)
-    print("lengths", rt.get(reduced), "squares", sum, "counter", count)
+    var gpu_sum = 0
+    for r in gpu_squares:
+        gpu_sum += rt.get(r)
+    for i in range(GPU_CALLS):
+        var got = rt.get(gpu_adds[i])
+        if got != i + 1:
+            raise Error("gpu call ", i, " answered ", got, ", expected ", i + 1)
+    var gpu_count = rt.get(rt.call[GpuAdd](gpu_counter, 0))
+    rt.kill(gpu_counter)
+    print(
+        "lengths",
+        rt.get(reduced),
+        "squares",
+        sum,
+        "counter",
+        count,
+        "gpu squares",
+        gpu_sum,
+        "gpu counter",
+        gpu_count,
+    )

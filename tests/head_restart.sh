@@ -6,6 +6,9 @@
 # process shares a checkpoint directory, and the new head restores the actor
 # from its newest checkpoint. A stream unfinished at the restart fails with
 # "stream interrupted: the head restarted", after the items it had answered.
+# Two more workers are in group gpu, with a gpu task and a gpu actor: the
+# workers rejoin in their group, the driver sends its groups frame again,
+# and both stay on them, the actor restored from its checkpoint too.
 set -euo pipefail
 mkdir -p build
 export DISTA_CHECKPOINT_URI=$PWD/build/restart-checkpoints
@@ -39,16 +42,28 @@ for _ in 1 2 3 4; do
   DISTA_ROLE=worker DISTA_HEAD=localhost:$port ./build/restart-driver >> build/restart-workers.log 2>&1 &
   pids+=($!)
 done
+for _ in 1 2; do
+  DISTA_GROUP=gpu DISTA_ROLE=worker DISTA_HEAD=localhost:$port ./build/restart-driver >> build/restart-workers.log 2>&1 &
+  pids+=($!)
+done
 
 DISTA_HEAD=localhost:$port ./build/restart-driver > build/restart-driver.log 2>&1 &
 driver=$!
 pids+=($driver)
-# Once the actor has a checkpoint, so the new head has one to restore from.
+# Once both actors have a checkpoint, so the new head has them to restore
+# from.
+checkpointed() {
+  local n=0 d
+  for d in "$DISTA_CHECKPOINT_URI"/*/; do
+    [ -n "$(ls -A "$d" 2>/dev/null)" ] && n=$((n + 1))
+  done
+  [ $n -ge 2 ]
+}
 for _ in $(seq 300); do
-  ls "$DISTA_CHECKPOINT_URI"/*/* >/dev/null 2>&1 && break
+  checkpointed && break
   sleep 0.1
 done
-ls "$DISTA_CHECKPOINT_URI"/*/* >/dev/null 2>&1 || { echo "FAIL: the actor never wrote a checkpoint"; exit 1; }
+checkpointed || { echo "FAIL: the actors never wrote a checkpoint each"; exit 1; }
 kill -9 "$head"
 sleep 0.5
 start_head "$port"
@@ -59,7 +74,7 @@ wait "$driver" || status=$?
 out=$(grep '^lengths' build/restart-driver.log || true)
 echo "driver: $out"
 # 400 blobs of 100,000 + i bytes; squares of 0..399.
-want="lengths $((400 * 100000 + 399 * 400 / 2)) squares $((399 * 400 * 799 / 6)) counter 300"
+want="lengths $((400 * 100000 + 399 * 400 / 2)) squares $((399 * 400 * 799 / 6)) counter 300 gpu squares $((99 * 100 * 199 / 6)) gpu counter 200"
 if [ $status != 0 ] || [ "$out" != "$want" ]; then
   echo "FAIL: wanted '$want' (driver exit $status)"
   cat build/restart-driver.log; tail -20 build/restart-head.log build/restart-workers.log
@@ -70,4 +85,5 @@ grep -q "^stream: [0-9]* items, then stream interrupted: the head restarted$" bu
 grep "^stream" build/restart-driver.log
 grep -q "resuming" build/restart-driver.log || { echo "FAIL: the driver never lost its head"; exit 1; }
 grep "restoring actor" build/restart-head.log || { echo "FAIL: the actor wasn't restored from a checkpoint"; exit 1; }
-echo "PASS head restart: killed mid-run, workers rejoined, the driver resumed, answers and the actor's count exact, the stream interrupted"
+[ "$(grep -c "restoring actor" build/restart-head.log)" -ge 2 ] || { echo "FAIL: both actors weren't restored from a checkpoint"; exit 1; }
+echo "PASS head restart: killed mid-run, workers rejoined in their groups, the driver resumed, answers and both actors' counts exact, the stream interrupted"
