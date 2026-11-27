@@ -1828,6 +1828,15 @@ struct Head(Movable):
                 put_scalar[DType.uint64](
                     body, UInt64(self._queued() + len(self._waiting))
                 )
+                # The group the payload names ("" for none, as an older
+                # driver's empty payload asks): its slots, and whether no
+                # more of its workers can join. An older driver reads only
+                # the five counts above.
+                var g = message(f.payload)
+                put_scalar[DType.uint64](body, UInt64(self._slots_in(g)))
+                put_scalar[DType.uint64](
+                    body, UInt64(1) if self._all_joined(g) else UInt64(0)
+                )
                 self._conns[i].send(KIND_STATS, 0, 0, body)
             else:
                 raise Error("driver sent frame kind ", Int(f.kind))
@@ -3617,6 +3626,32 @@ struct Head(Movable):
         if streams > 0 and streams >= self._admit[i]:
             return streams
         return self._admit[i] + self._pipeline - 1
+
+    def _slots_in(self, g: String) -> Int:
+        """The slots that group `g`'s workers have room to fill, those
+        draining left out: what a flow's streams and tasks of that group
+        share."""
+        var n = 0
+        for i in range(len(self._roles)):
+            if (
+                self._roles[i] == ROLE_WORKER
+                and self._group[i] == g
+                and self._draining[i] == _DRAIN_NO
+            ):
+                n += self._admit[i]
+        return n
+
+    def _all_joined(self, g: String) -> Bool:
+        """Whether no more workers of group `g` can join: in local mode,
+        once every one forked in it has said hello or gone away. Never in a
+        cluster, where one may join at any time."""
+        if self._local_workers == 0:
+            return False
+        var joined = self._lost_in.get(g, 0)
+        for i in range(len(self._roles)):
+            if self._roles[i] == ROLE_WORKER and self._group[i] == g:
+                joined += 1
+        return joined >= self._local_groups.get(g, 0)
 
     def _streams_on(self, i: Int) -> Int:
         """How many streams worker `i` is running."""

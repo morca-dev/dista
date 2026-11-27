@@ -189,6 +189,10 @@ def main() raises:
         0,
     ]
     seeds.append(first^)
+    # The driver asks for stats naming group "g" (13, payload "g"), as a
+    # flow asks for its read's group's slots.
+    var slots: List[UInt8] = [0, 13, 0, 0, 1, 103]
+    seeds.append(slots^)
     # A task-after (6) on object 1, then the worker stores 1 (7), errors 2.
     var second: List[UInt8] = [
         0,

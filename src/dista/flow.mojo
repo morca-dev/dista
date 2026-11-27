@@ -29,7 +29,8 @@ results the next operator hasn't taken. It submits downstream first, and
 waits with `rt.wait` for any task in flight or any stream's next item or
 end. It reads a stream's next item only when the first `Map` has room, so a
 full operator stops the one before it, back to the read, whose streams then
-stop at their window. A `Read` runs `streams` inputs at once, so the
+stop at their window. A `Read` runs up to `streams` inputs at once (fewer
+when the operators after it need its group's slots, see `Read`), so the
 objects in flight stay within `streams * window` plus the budgets, besides
 the results held for inputs not yet finished. An input's ref is released as
 soon as the task given it is submitted.
@@ -46,6 +47,7 @@ what each operator has done. See DESIGN.md, "Flows".
 """
 
 from std.reflection import reflect
+from std.time import perf_counter_ns
 
 from dista.client import Client, ObjectRef
 from dista.loss import is_loss
@@ -86,8 +88,18 @@ trait OpLike:
 
 
 struct Read[T: StreamLike, streams: Int = 4, window: Int = 16](OpLike):
-    """The first operator: a `TaskStream` run on each input, `streams`
-    inputs at once, each with this `window`."""
+    """The first operator: a `TaskStream` run on each input, up to `streams`
+    inputs at once, each with this `window`.
+
+    A running stream holds a slot of its worker until it ends, its window
+    full included. So when an operator after the read runs in the read's
+    group, the read opens at most that group's slots less one streams at
+    once, and never fewer than one, leaving a slot for that operator's
+    tasks. The executor asks the head for the slots at `start`, again
+    before it opens a stream, and every 100 ms while the cap is below
+    `streams` and inputs are left to open, as workers join and leave. A
+    group whose only slot the one stream would hold, once no more of its
+    workers can join (local mode), fails the flow rather than hanging it."""
 
     comptime In = Self.T.A
     comptime Out = Self.T.Item
@@ -229,6 +241,7 @@ struct Flow[*Ops: OpLike]:
             ):
                 raise Error(T.name(), ": a StatefulTask goes in a MapWith")
         var run = FlowRun[*Self.Ops](inputs^, retries)
+        run._set_cap(rt.client())
         return run^
 
     @staticmethod
@@ -372,6 +385,12 @@ struct FlowRun[*Ops: OpLike](Movable):
     """Per operator, the counters `stats` gives."""
     var _failure: String
     """Why the flow failed, once it has; "" until then."""
+    var _cap: Int
+    """The streams the read may have open at once: its `streams`, or fewer
+    when its group's slots are shared with the operators after it."""
+    var _asked: Int
+    """When the executor last asked the head for the read's group's slots,
+    `perf_counter_ns`; 0 before it has."""
 
     def __init__(out self, var inputs: List[Self.Ops[0].In], retries: Int):
         var n = len(inputs)
@@ -400,6 +419,8 @@ struct FlowRun[*Ops: OpLike](Movable):
         self._done = List[Int](length=Self.N, fill=0)
         self._reruns = List[Int](length=Self.N, fill=0)
         self._failure = String()
+        self._cap = Self.Ops[0].BUDGET
+        self._asked = 0
 
     def next[
         *Ts: TaskLike
@@ -505,6 +526,49 @@ struct FlowRun[*Ops: OpLike](Movable):
                 return String("operator ", i, " (", kind, " ", name, ")")
         return String("operator ", op)
 
+    @staticmethod
+    def _shares_group() -> Bool:
+        """Whether an operator after the read runs in the read's group, and
+        so needs a slot the read's streams could all hold."""
+        comptime for i in range(1, Self.N):
+            if Self.Ops[i].Task.group_name() == Self.Ops[0].Task.group_name():
+                return True
+        return False
+
+    def _set_cap(mut self, mut c: Client) raises:
+        """Asks the head for the slots of the read's group, and sets how many
+        streams may be open at once: those slots less one, at least one and
+        at most the read's `streams`, when an operator after the read needs
+        a slot of the same group. A head older than the question leaves the
+        read's `streams`. Raises if the group has one slot and no more
+        workers can join it: its one stream would hold it, and the flow
+        would wait for ever."""
+        if not Self._shares_group():
+            return
+        self._asked = perf_counter_ns()
+        var group = String(Self.Ops[0].Task.group_name())
+        var gs = c.group_slots(group)
+        if not gs:
+            return
+        var slots = gs.value().slots
+        if gs.value().fixed and slots == 1:
+            var which = String("the workers with no group")
+            if group != "":
+                which = String("the workers of group ", group)
+            raise Error(
+                Self._describe(0),
+                " can't run: ",
+                which,
+                (
+                    " have 1 slot between them, which the read's stream would"
+                    " hold,"
+                ),
+                " and the operators after the read run on the same workers and",
+                " need a free slot; add a worker, or give one more slots",
+                " (DISTA_WORKER_SLOTS)",
+            )
+        self._cap = max(1, min(Self.Ops[0].BUDGET, slots - 1))
+
     def _room(self, op: Int) -> Int:
         """How many more batches operator `op` may be given."""
         if op >= Self.N:
@@ -552,7 +616,20 @@ struct FlowRun[*Ops: OpLike](Movable):
                 self._submitted[op] += 1
             op -= 1
         self._read(c)
-        while len(self._streams) < Self.Ops[0].BUDGET and (
+        var to_open = len(self._again) > 0 or self._opened < len(self._inputs)
+        # The read's group's slots change as workers join and leave: they
+        # are asked for again before a stream opens, and while the cap is
+        # below the read's streams, every 100 ms, in case it may rise or
+        # the group turns out to have one slot for good.
+        if to_open and (
+            len(self._streams) < self._cap
+            or (
+                self._cap < Self.Ops[0].BUDGET
+                and perf_counter_ns() - self._asked >= 100_000_000
+            )
+        ):
+            self._set_cap(c)
+        while len(self._streams) < self._cap and (
             len(self._again) > 0 or self._opened < len(self._inputs)
         ):
             if len(self._again) > 0:
@@ -577,8 +654,14 @@ struct FlowRun[*Ops: OpLike](Movable):
             ids.append(s.id)
         if len(ids) == 0:
             raise Error("a flow has nothing in flight and inputs not done")
+        # While the cap may still change, the wait ends in time to ask again.
+        var timeout = -1.0
+        if self._cap < Self.Ops[0].BUDGET and (
+            len(self._again) > 0 or self._opened < len(self._inputs)
+        ):
+            timeout = 0.1
         var done = Dict[UInt64, Bool]()
-        for p in c.wait(ids):
+        for p in c.wait(ids, 1, timeout):
             done[ids[p]] = True
         # An error fails the flow before anything moves on; a loss reads
         # its input again.

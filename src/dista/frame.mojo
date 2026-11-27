@@ -23,7 +23,7 @@ Every frame is a 4-byte little-endian length, then that many bytes:
 | 10 task-inputs | head to worker | flags byte, count u64, then per input a tag byte, its object ID, then for tag 0 a length u64 and the bytes, or for tag 1 its location; with `WITH_VALUE`, a length u64 and the value |
 | 11 release | driver to head | none: the driver is done with this object |
 | 12 free | head to worker | none: delete this object |
-| 13 stats | driver to head, head to driver | none; the reply is five u64 counts (see `HeadStats`) |
+| 13 stats | driver to head, head to driver | none, or a worker group's name; the reply is five u64 counts (see `HeadStats`), then that group's slots u64 (no group's for none) and 1 if no more of its workers can join, else 0, u64 (see `GroupSlots`; an older head sends the five counts only) |
 | 14 holding | worker to head, on rejoining | count u64, then per object its ID u64 and its location |
 | 15 claim | driver to head, on resuming | none: this driver still holds this object, which lives on a worker |
 | 16 resumed | driver to head | none: this driver has restored, claimed or resubmitted everything |

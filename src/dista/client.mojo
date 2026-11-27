@@ -170,6 +170,18 @@ struct HeadStats(Copyable, Movable, Writable):
     """Tasks queued or waiting on inputs."""
 
 
+@fieldwise_init
+struct GroupSlots(Copyable, Movable, Writable):
+    """A worker group's slots, from `Client.group_slots`."""
+
+    var slots: Int
+    """The slots its workers have room to fill now, those draining left
+    out."""
+    var fixed: Bool
+    """Whether no more of its workers can join: in local mode, once every
+    one forked in it has said hello or gone away; never in a cluster."""
+
+
 comptime MAX_DRIVER_SPANS = 1_000_000
 """Driver spans kept until `timeline` writes them; later ones are dropped."""
 
@@ -524,6 +536,8 @@ struct Client(Movable):
     var _fetcher_index: Dict[String, Int]
     var _released: Dict[UInt64, Bool]
     var _stats: Optional[HeadStats]
+    var _group_slots: Optional[GroupSlots]
+    """The group's slots of the last stats reply; None from an older head."""
     var _head_addr: String
     """The head's `host:port`, to resume with after a restart, or "" in local
     mode, where the head doesn't come back."""
@@ -600,6 +614,7 @@ struct Client(Movable):
         self._fetcher_index = Dict[String, Int]()
         self._released = Dict[UInt64, Bool]()
         self._stats = None
+        self._group_slots = None
         self._head_addr = head_addr
         self._subs = Dict[UInt64, _Submission]()
         self._dependents = Dict[UInt64, Int]()
@@ -1289,6 +1304,11 @@ struct Client(Movable):
             for _ in range(5):
                 n.append(Int(get_scalar[DType.uint64](frame.payload, pos)))
             self._stats = HeadStats(n[0], n[1], n[2], n[3], n[4])
+            self._group_slots = None
+            if len(frame.payload) >= pos + 16:
+                var slots = Int(get_scalar[DType.uint64](frame.payload, pos))
+                var fixed = get_scalar[DType.uint64](frame.payload, pos)
+                self._group_slots = GroupSlots(slots, fixed == 1)
         else:
             raise Error("driver got frame kind ", Int(frame.kind))
 
@@ -1520,16 +1540,28 @@ struct Client(Movable):
 
     def stats(mut self) raises -> HeadStats:
         """Asks the head what it holds. Frames that arrive first are kept."""
+        self._ask_stats(String())
+        return self._stats.value().copy()
+
+    def group_slots(mut self, group: String) raises -> Optional[GroupSlots]:
+        """Asks the head how many slots worker group `group` ("" for none)
+        has, and whether more of its workers can join; None from a head
+        older than this question. Frames that arrive first are kept."""
+        self._ask_stats(group)
+        return self._group_slots.copy()
+
+    def _ask_stats(mut self, group: String) raises:
+        """Sends a stats frame naming `group` and reads until its reply."""
         self._stats = None
-        self._send(KIND_STATS, 0, List[UInt8]())
+        var body = List[UInt8](group.as_bytes())
+        self._send(KIND_STATS, 0, body)
         var asked = self._resumes
         while not self._stats:
             self._read_one()
             if self._resumes != asked:
                 # The head that was asked is gone: ask the new one.
                 asked = self._resumes
-                self._send(KIND_STATS, 0, List[UInt8]())
-        return self._stats.value().copy()
+                self._send(KIND_STATS, 0, body)
 
     def spans(mut self) raises -> List[TaskSpan]:
         """Every task this driver submitted that has finished, with its
