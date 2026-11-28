@@ -118,9 +118,25 @@ More embed processes help here because one process uses only the 4
 performance cores and the others are idle; each embed process adds about
 290 MB. The choice the plan named is still open: add a thread limit to
 encoder.mojo (`parallelize` takes a worker count), or compare one embed
-process with every core on each side. On `sai` (Linux) the pool may follow
-the process's CPU affinity: `taskset -c 0-3 ./build/bench-embed encode` and
-`ps -L` would tell, and that wasn't tried here.
+process with every core on each side.
+
+On Linux the choice isn't needed: the pool follows the process's CPU
+affinity, so `taskset` limits an embed process from outside. The encoder
+alone on `sai` (16 threads, x86-64), 4,000 texts, single runs on
+2026-11-27:
+
+| `taskset -c` | texts/s |
+|---|---|
+| `0-15` | 165 |
+| `0-3` | 130 |
+| `0` | 48 |
+| `0-15`, `MODULAR_THREAD_BUSY_WAIT_US=0` | 179 |
+
+One process gains little past 4 cores there, so the runs on `sai` will use
+several embed processes pinned to a few cores each, and Ray's side the same
+number of actors with as many CPUs and PyTorch threads. The whole flow on
+`sai` with one unpinned embed worker passes its check at 160 texts/s, with
+295 MB in the embed worker and 403 MB over all five processes.
 
 ### Local mode and the encoder
 
