@@ -182,7 +182,33 @@ fuzz-head = { cmd = "scripts/mojo-build.sh -D ASSERT=all -I src $DEP_INC fuzz/fu
 fuzz-scale = { cmd = "scripts/mojo-build.sh -D ASSERT=all -I src $DEP_INC fuzz/fuzz_scale.mojo -o build/fuzz-scale && ./build/fuzz-scale" }
 fuzz = { depends-on = ["fuzz-frames", "fuzz-codec", "fuzz-payloads", "fuzz-head", "fuzz-scale"] }
 
+# The embedding benchmark (bench/embed/README.md): a flow that embeds text
+# with encoder.mojo, which brings max-core; encoder-mojo is the census's pin.
+# dista's own tins are the default environment's packages. parquet.mojo and
+# the pure-Mojo tins it needs compile from checkouts under build/embed-deps,
+# which bench/embed/deps.sh makes at the revisions of the data job in
+# .github/workflows/ci.yml: the checkouts next to this one can be at other
+# revisions, and the parquet-mojo package pins another arrow-mlake.
+[feature.embed.dependencies]
+encoder-mojo = { git = "https://github.com/magmalake/encoder.mojo.git", rev = "9f0127caf27692094bce06919c00555c699b1d9e" }
+
+[feature.embed.activation.env]
+EMBED_INC = "-I bench/embed -I build/embed-deps/parquet.mojo/src -I build/embed-deps/thrift.mojo/src -I build/embed-deps/hashes.mojo/src -I build/embed-deps/snappy.mojo/src -I build/embed-deps/deflate.mojo/src -I build/embed-deps/threads.mojo/compat"
+
+# bench-embed runs bge-small-en-v1.5 (bench-embed-model downloads it) over a
+# corpus of EMBED_TEXTS texts (default 2,000) and checks the result;
+# bench-embed-stub runs the stub encoder over 640, small enough for CI. The
+# settings are environment variables (bench/embed/embed.mojo).
+[feature.embed.tasks]
+bench-embed-deps = { cmd = "sh bench/embed/deps.sh" }
+bench-embed-build = { cmd = "scripts/mojo-build.sh -I src $DEP_INC $EMBED_INC bench/embed/embed.mojo -o build/bench-embed", depends-on = ["bench-embed-deps"] }
+bench-embed-corpus = { cmd = "./build/bench-embed corpus", depends-on = ["bench-embed-build"] }
+bench-embed-model = { cmd = "sh bench/embed/get_model.sh" }
+bench-embed = { cmd = "./build/bench-embed run", depends-on = ["bench-embed-build"] }
+bench-embed-stub = { cmd = "./build/bench-embed run --stub=1 --texts=640 --rows=128 --corpus=build/embed/corpus-stub --out=build/embed/out-stub", depends-on = ["bench-embed-build"] }
+
 [environments]
 fuzz = ["fuzz"]
+embed = ["embed"]
 fmt = { features = ["fmt"], no-default-feature = true }
 data = { features = ["data"], no-default-feature = true }
