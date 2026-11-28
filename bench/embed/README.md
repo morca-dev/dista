@@ -2,7 +2,8 @@
 
 November 27, 2026 · a plan for step 5 of morca's
 [layers.md](https://github.com/morca-dev/morca/blob/main/docs/layers.md);
-PR 1 is built (see "Running it" and "PR 1 against the plan")
+PRs 1 and 2 are built (see "Running it", "PR 1 against the plan" and
+"Ray Data")
 
 The gate for `dista.flow` is an embedding job as a flow, beside the same job
 on Ray Data: read text in batches, embed each batch with a sentence
@@ -156,11 +157,11 @@ forks, which works with the stub only.
 | # | What | Done when |
 |---|---|---|
 | 1 | **(done)** The corpus generator, `embed.mojo` as a flow, the single-process check, the stub encoder; an `embed` environment in `pixi.toml` with encoder.mojo, outside the default one; the answer on threads | `pixi run -e embed bench-embed` passes its check on the Mac and on `sai` |
-| 2 | `embed_ray.py` and a `ray` environment (Ray Data, PyTorch for CPU, sentence-transformers), checked against the same reference | The Ray run passes the same check on both machines |
+| 2 | **(done)** `embed_ray.py` and a `ray` environment (Ray Data, PyTorch for CPU, sentence-transformers), checked against the same reference | The Ray run passes the same check on both machines |
 | 3 | The runs: a script that samples memory, runs the sizes, kills a worker, and writes a results folder as `bench/cloud` does | The table above is filled in for both systems |
 | 4 | The write-up: this file becomes the results, with what the gate passed, what it didn't and what is still unmeasured | Merged with the numbers |
 
-Neither environment is part of the default one or of CI's test jobs. The
+No environment of the benchmark is part of the default one or of CI's test jobs. The
 plan had CI build `embed.mojo` and run it on a few hundred texts with the
 stub, so it can't rot; PR 1 leaves that out, since the `embed` environment
 is a large install (see "PR 1 against the plan").
@@ -174,6 +175,19 @@ pixi run -e embed bench-embed          # 4,000 texts through the flow, then the 
 pixi run -e embed bench-embed-stub     # 640 texts with the stub, no model needed
 ./build/bench-embed run --texts=20000 --workers=2 --embed-workers=2
 ./build/bench-embed encode --texts=8000   # the encoder alone, in one process
+```
+
+Ray's side reads the corpus the embed environment wrote, so
+`bench-embed-corpus` (or `bench-embed-stub`, for the stub's) comes first:
+
+```sh
+pixi run -e ray bench-embed-ray            # the same 4,000 texts on Ray Data
+pixi run -e embed bench-embed-check        # build/embed/out-ray against encoder.mojo
+pixi run -e ray bench-embed-ray-stub       # the stub's 640 texts on Ray Data
+pixi run -e embed bench-embed-check-stub   # build/embed/out-ray-stub against the stub
+pixi run -e ray python bench/embed/embed_ray.py --embed-workers=2 --threads=2
+pixi run -e ray python bench/embed/embed_ray.py encode --threads=4   # PyTorch alone
+./build/bench-embed check --out=DIR [--corpus=DIR] [--stub=1] [--tolerance=X]
 ```
 
 `bench-embed-build` first checks out parquet.mojo and its pure-Mojo tins
@@ -261,6 +275,129 @@ memory bar in PR 3 will have to look at it.
   environment brings max-core (443 MB installed on macOS). Running the
   stub in CI needs that install in the data job or a job of its own, so it
   is left for a decision.
+
+## Ray Data (PR 2)
+
+`embed_ray.py` runs the same job on Ray Data: `read_parquet` over the
+corpus files, `map_batches` with a class `Embed` that holds a
+`SentenceTransformer`, and `write_parquet` into `OUT/vectors`, with the
+columns the flow writes (`id` int64, `vector` binary of 384 little-endian
+float32 values). Its flags are `embed.mojo`'s where they apply, plus
+`--threads` (T), `--cpus` and `--ray-tmp`; `encode` runs PyTorch alone in
+one process, as `bench-embed encode` runs encoder.mojo.
+
+- **The `ray` environment** takes `no-default-feature` and conda-forge
+  alone, so it has no Mojo toolchain and the other environments' parts of
+  `pixi.lock` don't change. It locks Python 3.12.16, ray-data 2.59.0 (the
+  version bench/ray's image pins), PyTorch 2.14.1 for the CPU (the
+  `cpu_generic` build on macOS and linux-aarch64, `cpu_mkl` on linux-64),
+  sentence-transformers 6.3.0, transformers 5.17.0, pyarrow 26.0.0 and
+  numpy 2.5.5, on osx-arm64, linux-64 and linux-aarch64. It installs
+  1.5 GB on macOS.
+- **Accelerate on macOS.** conda-forge's PyTorch for macOS uses OpenBLAS
+  by default, which ran PyTorch alone at 205 texts/s (4,000 texts, 4
+  threads). With `libblas` switched to Accelerate, as PyTorch's own wheels
+  use there, it runs at 516. The environment asks for Accelerate on
+  osx-arm64 only.
+- **The model.** Each actor loads the files `bench-embed-model` downloaded,
+  so the weights are the same files encoder.mojo reads. That directory has
+  no `modules.json`, and without one `SentenceTransformer(dir)` would pool
+  by the mean, so the script builds it from its modules: the transformer,
+  then the pooling `1_Pooling/config.json` names (CLS), and
+  `normalize_embeddings=True`. It runs with `device="cpu"`, so MPS is never
+  picked. `HF_HUB_OFFLINE=1` is set, and nothing is downloaded.
+- **E, T and the CPUs.** `compute=ActorPoolStrategy(size=E)` (what
+  `concurrency=E` meant before Ray 2.51 deprecated it) gives E actors, each
+  with `num_cpus=T` and `torch.set_num_threads(T)`. `ray.init` gets
+  `E * T + 2` CPUs, two more for the read and write tasks, as the flow has
+  K = 2 workers for them. Ray's `num_cpus` is only a scheduling count;
+  the thread count is what limits an actor.
+- **The batches are the same.** Ray reads each corpus file as one block of
+  512 rows, and `map_batches(batch_size=32)` cuts it into the file's row
+  groups. Each call records its first id and size, and every run so far
+  had every batch equal to a corpus row group (125 of 125 at 4,000 texts,
+  625 of 625 at 20,000), so padding is the same on both sides. A corpus
+  whose files aren't a multiple of 32 rows could give batches that span two
+  files; the run reports any batch that isn't a row group.
+- **The output files differ.** Ray writes one file per block (8 files at
+  4,000 texts), the flow one per batch (125). The check matches rows by
+  id, so the layout doesn't matter to it.
+- **The stub is the same to the bit.** `embed.mojo`'s stub sums its norm
+  in fused multiply-adds, as the Mojo compiler makes `norm += v * v`, and
+  the Python port does the same. Its largest difference from the Mojo stub
+  is 0.0; summed without fusing, one value in ten differed in its last bit.
+  In Python the stub runs at about 8,400 texts/s in one actor, against
+  154,000 for the flow's, so Ray's stub runs will be slower for that alone.
+- **Memory** is printed for the driver and each embed actor (`ru_maxrss`).
+  Ray's own processes and its read and write workers aren't counted; PR 3's
+  sampler measures every process of both jobs.
+
+### The check across kernels
+
+`./build/bench-embed check --out=DIR` reads every `*.parquet` file under
+`DIR`, whatever its name, and compares it with one process embedding the
+corpus a row group at a time with encoder.mojo (or the stub, with
+`--stub=1`): every corpus id exactly once and no other, every value within
+the tolerance. It prints the largest absolute difference and the smallest
+cosine. PyTorch's vectors against encoder.mojo's, on this Mac:
+
+| Texts | largest absolute difference | smallest cosine |
+|---|---|---|
+| 4,000 | 4.5e-7 | 0.999999999999 |
+| 20,000 | 5.1e-7 | 0.999999999999 |
+
+The default tolerance with the model is therefore 1e-5, about 20 times the
+largest difference seen; with the stub it is 1e-6, and the differences are
+0.0. The flow's own check keeps 1e-5. A run with `--corrupt=1` adds 0.01 to
+one value of id 0, and the check fails on it; so does a missing file
+(missing ids) and a file copied twice (an id twice).
+
+### First numbers for Ray Data (single runs from development, not the gate's results)
+
+The same Mac, November 27, 2026, 20,000 texts (40 files of 512 rows), the
+model's load included and Ray's or the cluster's start not, every Ray run
+passing its check:
+
+| Run | E | T | texts/s | peak RSS of an embed process |
+|---|---|---|---|---|
+| dista flow (K = 2) | 1 | 4 (the performance cores; not settable) | 666 | 291 MB (PR 1, 4,000 texts) |
+| Ray Data | 1 | 4 | 459 | 811 MB |
+| Ray Data | 2 | 2 | 451 | 900 MB |
+| dista flow | 2 | 4 each | 859 | |
+| Ray Data | 2 | 4 | 504 | 925 MB |
+| Ray Data | 4 | 2 | 625 | 950 to 967 MB |
+| dista flow | 4 | 4 each | 1,091 | |
+| Ray Data | 4 | 4 | 653 | 902 to 918 MB |
+
+The flow's sums over all its processes were 350, 642 and 1,224 MB at E = 1,
+2 and 4. Ray's driver peaked at 227 MB. Each encoder alone, in one process
+(`bench-embed encode` and `embed_ray.py encode`, 20,000 texts, the load not
+included):
+
+| Encoder | threads | texts/s |
+|---|---|---|
+| encoder.mojo | 4 (the performance cores) | 664 |
+| PyTorch 2.14.1 (Accelerate) | 4 | 510 |
+| PyTorch | 2 | 435 |
+| PyTorch | 1 | 331 |
+
+At 4,000 texts (the `bench-embed-ray` default) Ray Data ran at 357
+texts/s with E = 1 and T = 4, where the flow ran at 659: the actor's start
+and the model's load (2.6 s) weigh more in a run of 11 s.
+
+So most of the gap at E = 1 is the encoders' (664 against 510 texts/s
+alone); the rest is Ray's actor start and model load (2.5 s of the 43.6 s)
+and its reads and writes. Three things make the comparison uneven, and the
+write-up should say them:
+
+- **The kernels differ**, and PyTorch's speed depends on its BLAS: with
+  conda-forge's default OpenBLAS it was 2.5 times slower here.
+- **Threads can be limited on Ray's side and not on dista's on macOS.** At
+  E = 4 each dista embed process still runs 4 threads, 16 on 10 cores;
+  Ray's T = 2 row gives each actor 2. On Linux, `taskset` evens this out.
+- **An embed process costs about three times the memory on Ray's side**
+  (811 MB against 291 MB), most of it PyTorch and transformers rather than
+  Ray itself.
 
 ## Not in this plan
 

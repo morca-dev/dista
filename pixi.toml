@@ -206,9 +206,46 @@ bench-embed-corpus = { cmd = "./build/bench-embed corpus", depends-on = ["bench-
 bench-embed-model = { cmd = "sh bench/embed/get_model.sh" }
 bench-embed = { cmd = "./build/bench-embed run", depends-on = ["bench-embed-build"] }
 bench-embed-stub = { cmd = "./build/bench-embed run --stub=1 --texts=640 --rows=128 --corpus=build/embed/corpus-stub --out=build/embed/out-stub", depends-on = ["bench-embed-build"] }
+# bench-embed-check checks any output directory of the flow's layout, such as
+# the ray environment's bench-embed-ray writes, against one process running
+# encoder.mojo; bench-embed-check-stub checks bench-embed-ray-stub's against
+# the stub.
+bench-embed-check = { cmd = "./build/bench-embed check --out={{ out }}", args = [{ arg = "out", default = "build/embed/out-ray" }], depends-on = ["bench-embed-build"] }
+bench-embed-check-stub = { cmd = "./build/bench-embed check --stub=1 --corpus=build/embed/corpus-stub --out={{ out }}", args = [{ arg = "out", default = "build/embed/out-ray-stub" }], depends-on = ["bench-embed-build"] }
+
+# Ray's side of the embedding benchmark (bench/embed/README.md, "Ray Data"):
+# Ray Data, PyTorch for the CPU and sentence-transformers, all from
+# conda-forge, at the Ray that bench/ray's image pins. It takes
+# `no-default-feature`, so it has no Mojo toolchain and its solve doesn't
+# touch the others. bench-embed-check (in the embed environment) checks its
+# output.
+[feature.ray]
+channels = ["conda-forge"]
+
+[feature.ray.dependencies]
+python = "3.12.*"
+ray-data = "==2.59.0"
+pytorch = { version = ">=2.5", build = "cpu*" }
+sentence-transformers = ">=5"
+pyarrow = "*"
+numpy = "*"
+
+# conda-forge's PyTorch for macOS links the reference BLAS interface, which is
+# OpenBLAS unless told otherwise; Accelerate is what PyTorch's own wheels use
+# there, and it is several times faster for this model (README, "Ray Data").
+[feature.ray.target.osx-arm64.dependencies]
+libblas = { version = "*", build = "*accelerate" }
+
+[feature.ray.activation.env]
+HF_HUB_OFFLINE = "1"
+
+[feature.ray.tasks]
+bench-embed-ray = { cmd = "python bench/embed/embed_ray.py" }
+bench-embed-ray-stub = { cmd = "python bench/embed/embed_ray.py --stub=1 --corpus=build/embed/corpus-stub --out=build/embed/out-ray-stub" }
 
 [environments]
 fuzz = ["fuzz"]
 embed = ["embed"]
 fmt = { features = ["fmt"], no-default-feature = true }
 data = { features = ["data"], no-default-feature = true }
+ray = { features = ["ray"], no-default-feature = true }
