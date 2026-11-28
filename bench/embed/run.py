@@ -151,10 +151,30 @@ class Sampler(threading.Thread):
         self.procs = {}  # pid -> dict(name, start, first, last, peak, cpu, ...)
         self.series = []  # (t, sum MB, processes)
 
+    metrics_port = 0
+    retried = None
+
     def run(self):
         while not self.done.is_set():
             self.sample()
+            if self.metrics_port:
+                self.ask_metrics()
             self.done.wait(1.0)
+
+    def ask_metrics(self):
+        """dista's head: `dista_tasks_retried_total`, the tasks sent again
+        because their worker went away."""
+        import urllib.request
+
+        try:
+            url = f"http://127.0.0.1:{self.metrics_port}/metrics"
+            with urllib.request.urlopen(url, timeout=0.5) as f:
+                text = f.read().decode()
+        except OSError:
+            return
+        m = re.search(r"^dista_tasks_retried_total (\d+)", text, re.M)
+        if m:
+            self.retried = int(m[1])
 
     def sample(self):
         table = _proc_table()
@@ -327,6 +347,10 @@ def build_command(a, corpus, out):
             env["EMBED_PIN"] = a.pin
         if a.busy_wait_0:
             env["MODULAR_THREAD_BUSY_WAIT_US"] = "0"
+        if a.mode == "run":
+            with socket.socket() as sk:
+                sk.bind(("127.0.0.1", 0))
+                env["EMBED_METRICS_PORT"] = str(sk.getsockname()[1])
     else:
         env = pixi_env("ray")
         cmd = ["python", os.path.join(ROOT, "bench", "embed", "embed_ray.py"), a.mode,
@@ -467,6 +491,7 @@ def main():
         log.flush()
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         sampler = Sampler(proc.pid, t0)
+        sampler.metrics_port = int(env.get("EMBED_METRICS_PORT", 0))
         sampler.start()
         killer = None
         if a.kill_after > 0:
@@ -574,7 +599,8 @@ def main():
         peak_at_s=f"{sampler.peak_at:.0f}", processes=len(sampler.procs),
         samples=sampler.samples, head_mb=head,
         head_objects_max=r.get("head_objects_max", ""),
-        reruns=r.get("reruns", ""), kill=note.get("kill", ""), groups=groups,
+        reruns=r.get("reruns", ""),
+        tasks_retried="" if sampler.retried is None else sampler.retried, kill=note.get("kill", ""), groups=groups,
         check=check, leftover=len(left),
         load_before=" ".join(f"{x:.2f}" for x in load0),
         load_after=" ".join(f"{x:.2f}" for x in load1),
@@ -584,13 +610,22 @@ def main():
                   if k in env),
     )
     tsv = os.path.join(results, "runs.tsv")
-    new = not os.path.exists(tsv)
-    with open(tsv, "a") as f:
-        if new:
-            f.write("\t".join(row) + "\n")
-        f.write("\t".join(str(v).replace("\t", " ") for v in row.values()) + "\n")
+    rows, cols = [], list(row)
+    if os.path.exists(tsv):
+        with open(tsv) as f:
+            lines = f.read().splitlines()
+        head = lines[0].split("\t")
+        rows = [dict(zip(head, line.split("\t"))) for line in lines[1:]]
+        # A column added since: every row gets it, empty where it wasn't kept.
+        cols = head + [c for c in row if c not in head]
+    rows.append({k: str(v).replace("\t", " ") for k, v in row.items()})
+    with open(tsv + ".tmp", "w") as f:
+        f.write("\t".join(cols) + "\n")
+        for x in rows:
+            f.write("\t".join(x.get(c, "") for c in cols) + "\n")
+    os.replace(tsv + ".tmp", tsv)
     print(json.dumps({k: row[k] for k in (
-        "id", "exit", "rate", "secs", "cpu_cores", "peak_mb", "reruns", "kill",
+        "id", "exit", "rate", "secs", "cpu_cores", "peak_mb", "reruns", "tasks_retried", "kill",
         "check", "groups", "head_mb", "head_objects_max", "leftover", "load_before")}))
     if a.keep and a.mode == "run":
         subprocess.run(["rm", "-rf", a.keep], check=True)

@@ -1,0 +1,7 @@
+pid	ppid	name	role	cpu_s	peak_mb	first_mb	first_t	last_mb	last_t
+62036	61972	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed	driver	0.4	16.4	14.5	0	16.4	127
+62038	62036	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed	head	0.6	16.4	15.0	1	16.4	127
+62040	62036	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed	worker in no group	0.2	15.4	15.3	1	15.4	127
+62041	62036	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed	worker in no group	2.2	15.4	15.3	1	15.4	127
+62042	62036	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed	worker in group embed	288.2	290.8	290.8	1	290.8	127
+62043	62036	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed	worker in group embed	287.9	290.8	290.8	1	290.8	127

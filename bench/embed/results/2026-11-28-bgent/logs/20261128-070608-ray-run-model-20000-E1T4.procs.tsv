@@ -1,0 +1,23 @@
+pid	ppid	name	role	cpu_s	peak_mb	first_mb	first_t	last_mb	last_t
+59792	59687	python		1.9	226.6	19.2	0	226.3	49
+59797	59792	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	10.2	10.2	1	10.2	49
+59798	59792	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/lib/python3.12/site-packages/ray/core/src/ray/gcs/gcs_server		0.3	62.2	54.6	1	62.2	48
+59799	59792	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.2	79.5	35.6	1	79.5	49
+59802	59792	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.3	99.8	97.7	2	99.8	49
+59814	59792	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.4	76.9	69.7	2	76.9	49
+59815	59792	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/lib/python3.12/site-packages/ray/core/src/ray/raylet/raylet		0.4	32.5	24.9	2	32.5	48
+59816	59815	ray::DashboardAgent		0.3	95.9	70.5	2	95.9	48
+59817	59815	ray::RuntimeEnvAgent		0.2	83.1	70.5	2	83.1	48
+59818	59814	system_profiler		0.0	4.4	4.4	2	4.4	2
+59819	59818	/usr/sbin/system_profiler		0.1	9.7	9.7	2	9.7	2
+59820	59816	system_profiler		0.0	4.4	4.4	2	4.4	2
+59821	59817	system_profiler		0.0	4.4	4.4	2	4.4	2
+59822	59821	/usr/sbin/system_profiler		0.0	9.6	9.6	2	9.6	2
+59823	59820	/usr/sbin/system_profiler		0.0	9.5	9.5	2	9.5	2
+59827	59815	ray::_AutoscalingCoordinatorActor		1.0	191.8	68.6	3	191.8	48
+59828	59815	ray::MapWorker(MapBatches(Embed))		89.9	799.2	68.6	3	797.9	48
+59829	59815	(python3.12)		1.1	215.1	67.0	3	215.1	47
+59830	59815	(python3.12)		1.4	217.7	67.9	3	217.7	47
+59831	59815	ray::_StatsActor		0.9	187.9	67.4	3	187.9	48
+59832	59815	ray::ActorLocationTracker		0.5	121.8	65.9	3	121.8	48
+59854	59828	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	13.2	13.2	7	13.2	48

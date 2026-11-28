@@ -37,7 +37,8 @@ group: the reads and the writes), `--embed-workers` or EMBED_GROUP_WORKERS
 (E, workers in group `embed`), `--check=0` (no check) and `--corrupt=1`
 (one wrong value, which the check must catch); each flag's variable is its
 name in capitals after EMBED_. EMBED_PIN (Linux only) pins each embed worker
-to a set of CPUs, such as `0-3/4-7` for E=2 (`parse_pin`).
+to a set of CPUs, such as `0-3/4-7` for E=2 (`parse_pin`), and
+EMBED_METRICS_PORT serves the head's `/metrics` on that port.
 """
 
 from std.ffi import c_int, external_call
@@ -542,7 +543,14 @@ struct Cluster(Movable):
         _ = setenv("DISTA_ROLE", "head")
         _ = setenv("DISTA_PORT", "0")
         var head_log = String(logs, "/head.log")
+        # EMBED_METRICS_PORT: the head's /metrics (DISTA_METRICS_PORT), for
+        # its count of tasks retried after a worker went away; the head's
+        # only, since the workers would take the same port.
+        var metrics = getenv("EMBED_METRICS_PORT")
+        if metrics.byte_length() > 0:
+            _ = setenv("DISTA_METRICS_PORT", metrics)
         self.pids.append(_spawn(head_log))
+        _ = unsetenv("DISTA_METRICS_PORT")
         self.roles.append("head")
         var head = String("127.0.0.1:", _head_port(head_log))
         var pin = parse_pin(getenv("EMBED_PIN"))

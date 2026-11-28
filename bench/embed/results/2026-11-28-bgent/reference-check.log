@@ -1,0 +1,2 @@
+check: passed, 100000 ids once each in 3125 files under build/embed/runs/ref, largest difference 0.0, smallest cosine 1.0 (tolerance 1e-05, model); 151.94 s to embed the corpus, 152.13 s in all
+exit 0

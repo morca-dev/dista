@@ -1,0 +1,24 @@
+pid	ppid	name	role	cpu_s	peak_mb	first_mb	first_t	last_mb	last_t
+91528	91423	python		2.0	227.7	19.1	0	227.7	45
+91536	91528	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	10.0	10.0	2	10.0	45
+91537	91528	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/lib/python3.12/site-packages/ray/core/src/ray/gcs/gcs_server		0.4	62.6	54.9	2	62.6	44
+91538	91528	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.2	80.3	77.6	2	80.3	45
+91539	91528	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.3	100.0	97.4	2	100.0	45
+91546	91528	system_profiler		0.0	5.1	5.1	2	5.1	2
+91547	91546	(system_profiler)		0.0	0.0	0.0	0	0.0	2
+91552	91528	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.4	77.7	75.7	3	77.7	45
+91553	91528	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/lib/python3.12/site-packages/ray/core/src/ray/raylet/raylet		0.4	32.5	27.8	3	32.5	44
+91554	91553	ray::DashboardAgent		0.3	95.8	95.5	3	95.8	44
+91555	91553	ray::RuntimeEnvAgent		0.2	82.8	82.6	3	82.8	44
+91566	91553	ray::IDLE		1.3	220.2	86.3	4	220.2	44
+91567	91553	ray::ActorLocationTracker		0.6	124.2	87.3	4	124.2	44
+91568	91553	ray::IDLE		0.3	86.1	86.0	4	86.1	7
+91569	91553	ray::MapWorker(MapBatches(Embed)).submit		63.2	920.9	115.4	4	920.9	44
+91570	91553	ray::IDLE		0.3	85.8	85.8	4	85.8	4
+91571	91553	ray::_StatsActor		1.0	189.8	104.6	4	189.8	44
+91572	91553	ray::IDLE		0.3	85.9	85.9	4	85.9	5
+91573	91553	ray::IDLE		1.5	222.4	86.0	4	222.4	44
+91574	91553	ray::_AutoscalingCoordinatorActor		1.1	194.5	111.5	4	194.5	44
+91575	91553	ray::MapWorker(MapBatches(Embed)).submit		61.2	909.6	117.4	4	909.6	43
+92200	91569	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	13.9	13.9	8	13.9	44
+92201	91575	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	13.6	13.6	8	13.6	43

@@ -1,0 +1,16 @@
+$ /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed run --texts=20000 --rows=512 --corpus=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512 --out=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/out-dista --workers=2 --embed-workers=1 --check=0
+corpus: 20000 texts in 40 files of 512 rows, 1.36 MB in /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512 (already there, 0.0 s)
+corpus: text 0 is "nn: A fast tokenizer for Mojo for GPUs, supporting Linux and macOS. Topics: llm, gpu, data"
+embed: 20000 texts, build/embed/models/bge-small-en-v1.5, K=2 workers + E=1 in group embed: 26.3 s, 760.4 texts/s (the model's load included)
+  operator 0 (Read): submitted 40, finished 625, in flight 0, reruns 0
+  operator 1 (MapWith): submitted 625, finished 625, in flight 0, reruns 0
+  operator 2 (Map): submitted 625, finished 625, in flight 0, reruns 0
+  head, largest of 19 samples about a second apart: 33 live objects, 17 results kept, 0 located on workers, 14 tasks pending
+  peak RSS (getrusage, before the check): driver 15.3 MB, largest child 290.8 MB
+    head (pid 79165): 15.2 MB
+    worker in no group (pid 79166): 15.3 MB
+    worker in no group (pid 79167): 14.6 MB
+    worker in group embed (pid 79168): 290.8 MB
+    sum over the driver and its 4 processes: 351.2 MB
+  state loaded: pid 79168, DISTA_GROUP=embed, in 0.05 s
+compare: passed, 20000 ids once each, largest difference from build/embed/runs/ref 0 (tolerance 1e-05)

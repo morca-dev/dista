@@ -1,0 +1,4 @@
+$ /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/bench-embed encode --texts=20000 --rows=512 --corpus=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512
+corpus: 20000 texts in 40 files of 512 rows, 1.36 MB in /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512 (already there, 0.0 s)
+corpus: text 0 is "nn: A fast tokenizer for Mojo for GPUs, supporting Linux and macOS. Topics: llm, gpu, data"
+encode: 20000 texts in one process: 25.78 s, 775.8 texts/s

@@ -1,0 +1,23 @@
+$ python /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/bench/embed/embed_ray.py run --corpus=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512 --threads=4 --out=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/out-ray --embed-workers=2 --ray-tmp=/Volumes/ExtNVMe/dev/morca-dev/rte
+2026-11-28 07:35:54,036	WARNING authentication_token_setup.py:85 -- Token authentication is enabled for this Ray cluster. Set RAY_AUTH_MODE=disabled to opt out. For more information, see https://docs.ray.io/en/latest/ray-security/token-auth.html
+[2026-11-28 07:35:57,040 E 94076 56150900] core_worker.cc:2297: Actor with class name: 'MapWorker(MapBatches(Embed))' and ID: '0a4b20cf05dddc00922bd61801000000' has constructor arguments in the object store and max_restarts > 0. If the arguments in the object store go out of scope or are lost, the actor restart will fail. See https://github.com/ray-project/ray/issues/53727 for more details.
+2026-11-28 07:35:57,042	WARNING __init__.py:28 -- Progress bars disabled. To enable, set `ray.data.DataContext.get_current().enable_progress_bars = True`.
+[36m(MapWorker(MapBatches(Embed)) pid=94612)[0m /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+[36m(MapWorker(MapBatches(Embed)) pid=94612)[0m   warnings.warn('resource_tracker: There appear to be %d '
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1795880198.672121 56151264 chttp2_transport.cc:1182] ipv4:127.0.0.1:62059: Got goaway [2] err=UNAVAILABLE:GOAWAY received; Error code: 2; Debug Text: Cancelling all calls {grpc_status:14, http2_error:2, created_time:"2026-11-28T07:36:38.672118-08:00"}
+[33m(raylet)[0m A worker died or was killed while executing a task by an unexpected system error. To troubleshoot the problem, check the logs for the dead worker. Lease ID: 02000000e86bb92e2b0bc2cc83c0a020fb47e971df11627e26c53b06695636c9 Worker ID: 017491ea89283f5077816f883ec6f833e4d7b10c38e51e63062ddf66 Node ID: 4821e10b36dfdcfb30efb8826ef7da6e064cf5c3f02994ea22000c30 Worker IP address: 127.0.0.1 Worker port: 62120 Worker PID: 94612 Worker exit type: SYSTEM_ERROR Worker exit detail: Worker unexpectedly exits with a connection error code 2. End of file. Some common causes include: (1) the process was killed by the OOM killer due to high memory usage, (2) ray stop --force was called, or (3) the worker crashed unexpectedly due to SIGSEGV or another unexpected error. If the process was killed by the kernel OOM killer (verifiable by checking for OOM in dmesg of the OOMing node), consider enabling resource isolation via --enable-resource-isolation to prevent node deaths by resource contention and significant loss of progress by uninformed kernel OOM killing.
+[33m(raylet)[0m Task MapWorker(MapBatches(Embed)).submit failed. There are infinite retries remaining, so the task will be retried. Error: The actor is temporarily unavailable: RpcError: RPC error: Socket closed rpc_code: 14
+[33m(raylet)[0m Task MapWorker(MapBatches(Embed)).submit failed. There are infinite retries remaining, so the task will be retried. Error: The actor is temporarily unavailable: RpcError: RPC error: Socket closed rpc_code: 14
+embed_ray: 20000 texts of 20000, /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/models/bge-small-en-v1.5, Ray Data with E=2 actors x T=4 threads, 10 CPUs: 41.44 s, 482.6 texts/s (the model's load included; ray.init 2.93 s before it, not included)
+  batches: 634, of which 634 are corpus row groups and 0 are not (the corpus has 625); 625 distinct, so 9 embedded again
+  state loaded: pid 94612, in 2.83 s
+  state loaded: pid 94614, in 2.83 s
+  state loaded: pid 97754, in 3.10 s
+  peak RSS (getrusage): driver 229.0 MB
+    embed actor (pid 94612): 899.4 MB
+    embed actor (pid 94614): 915.7 MB
+    embed actor (pid 97754): 895.1 MB
+    (Ray's own processes and its read and write workers aren't counted here)
+  output: /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/out-ray/vectors; check it with `./build/bench-embed check --out=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/out-ray --corpus=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512`
+compare: passed, 20000 ids once each, largest difference from build/embed/runs/ref 5.07e-07 (tolerance 1e-05)

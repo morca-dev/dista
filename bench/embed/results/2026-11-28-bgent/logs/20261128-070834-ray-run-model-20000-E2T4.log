@@ -1,0 +1,18 @@
+$ python /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/bench/embed/embed_ray.py run --corpus=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512 --threads=4 --out=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/out-ray --embed-workers=2 --ray-tmp=/Volumes/ExtNVMe/dev/morca-dev/rte
+2026-11-28 07:08:35,681	WARNING authentication_token_setup.py:85 -- Token authentication is enabled for this Ray cluster. Set RAY_AUTH_MODE=disabled to opt out. For more information, see https://docs.ray.io/en/latest/ray-security/token-auth.html
+[2026-11-28 07:08:38,655 E 60824 56030250] core_worker.cc:2297: Actor with class name: 'MapWorker(MapBatches(Embed))' and ID: 'da49faac2b6f9392c4c7823801000000' has constructor arguments in the object store and max_restarts > 0. If the arguments in the object store go out of scope or are lost, the actor restart will fail. See https://github.com/ray-project/ray/issues/53727 for more details.
+2026-11-28 07:08:38,657	WARNING __init__.py:28 -- Progress bars disabled. To enable, set `ray.data.DataContext.get_current().enable_progress_bars = True`.
+[33m(raylet)[0m WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+[33m(raylet)[0m I0000 00:00:1795878557.847104 56030582 chttp2_transport.cc:1182] ipv4:127.0.0.1:61964: Got goaway [2] err=UNAVAILABLE:GOAWAY received; Error code: 2; Debug Text: Cancelling all calls {created_time:"2026-11-28T07:09:17.847103-08:00", http2_error:2, grpc_status:14}
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1795878558.826516 56030359 chttp2_transport.cc:1182] ipv4:127.0.0.1:61906: Got goaway [2] err=UNAVAILABLE:GOAWAY received; Error code: 2; Debug Text: Cancelling all calls {grpc_status:14, http2_error:2, created_time:"2026-11-28T07:09:18.826514-08:00"}
+embed_ray: 20000 texts of 20000, /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/models/bge-small-en-v1.5, Ray Data with E=2 actors x T=4 threads, 10 CPUs: 40.00 s, 500.0 texts/s (the model's load included; ray.init 2.89 s before it, not included)
+  batches: 625, of which 625 are corpus row groups and 0 are not (the corpus has 625); 625 distinct, so 0 embedded again
+  state loaded: pid 60859, in 2.80 s
+  state loaded: pid 60862, in 2.81 s
+  peak RSS (getrusage): driver 227.7 MB
+    embed actor (pid 60859): 897.4 MB
+    embed actor (pid 60862): 919.0 MB
+    (Ray's own processes and its read and write workers aren't counted here)
+  output: /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/out-ray/vectors; check it with `./build/bench-embed check --out=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/out-ray --corpus=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512`
+compare: passed, 20000 ids once each, largest difference from build/embed/runs/ref 5.07e-07 (tolerance 1e-05)

@@ -1,0 +1,24 @@
+pid	ppid	name	role	cpu_s	peak_mb	first_mb	first_t	last_mb	last_t
+63754	63584	python		2.2	230.0	19.0	0	230.0	38
+63960	63754	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	10.4	10.4	1	10.4	38
+63961	63754	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/lib/python3.12/site-packages/ray/core/src/ray/gcs/gcs_server		0.4	63.2	54.8	1	63.2	37
+63963	63754	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.2	81.1	78.2	2	81.1	38
+63966	63754	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.3	99.7	97.3	2	99.7	38
+63977	63754	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.5	77.7	39.6	2	77.7	38
+63978	63754	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/lib/python3.12/site-packages/ray/core/src/ray/raylet/raylet		0.5	33.4	26.3	2	33.4	37
+63980	63978	ray::DashboardAgent		0.3	95.5	95.2	3	95.5	37
+63981	63978	ray::RuntimeEnvAgent		0.2	82.7	82.5	3	82.7	37
+63991	63978	ray::MapWorker(MapBatches(Embed)).submit		48.2	922.7	121.4	4	922.7	37
+63992	63978	ray::MapWorker(MapBatches(Embed)).submit		48.0	923.6	122.3	4	923.6	37
+63993	63978	ray::MapWorker(MapBatches(Embed)).submit		47.8	922.5	123.4	4	922.5	37
+63994	63978	ray::IDLE		1.8	222.2	97.2	4	222.2	37
+63995	63978	ray::ActorLocationTracker		0.6	124.1	87.2	4	124.1	37
+63996	63978	ray::_AutoscalingCoordinatorActor		1.2	195.7	123.5	4	195.7	37
+63997	63978	ray::_StatsActor		1.1	191.3	120.8	4	191.3	37
+63998	63978	ray::IDLE		1.7	221.8	97.8	4	221.8	37
+63999	63978	ray::MapWorker(MapBatches(Embed))		45.6	919.6	124.9	4	917.6	36
+64000	63978	ray::IDLE		0.3	86.2	86.2	4	86.2	4
+64035	63992	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.1	14.8	14.8	10	14.8	37
+64036	63991	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	14.4	14.4	10	14.4	37
+64037	63993	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	14.3	14.3	10	14.3	37
+64038	63999	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	13.7	13.7	10	13.7	36

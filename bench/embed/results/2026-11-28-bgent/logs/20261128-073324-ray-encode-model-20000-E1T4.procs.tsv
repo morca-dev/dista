@@ -1,0 +1,3 @@
+pid	ppid	name	role	cpu_s	peak_mb	first_mb	first_t	last_mb	last_t
+89929	89813	python		87.2	735.9	13.8	0	735.9	47
+90423	89929	/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/.pixi/envs/ray/bin/python		0.0	13.3	13.3	8	13.3	47

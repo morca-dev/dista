@@ -1,0 +1,2 @@
+$ python /Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/bench/embed/embed_ray.py encode --corpus=/Volumes/ExtNVMe/dev/morca-dev/wt-dista-embed/build/embed/runs/corpus-model-20000-512 --threads=4
+encode: 20000 texts in one process, PyTorch 2.14.1 with 4 threads: 39.82 s, 502.3 texts/s (load 4.30 s, not included)
