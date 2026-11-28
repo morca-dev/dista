@@ -399,6 +399,13 @@ write-up should say them:
   (811 MB against 291 MB), most of it PyTorch and transformers rather than
   Ray itself.
 
+On `sai` (16 threads, x86-64, PyTorch on MKL), 4,000 texts, single runs on
+2026-11-27: both sides pass the check, Ray Data's with a largest difference
+of 3.9e-7 and a smallest cosine of 0.9999999999992. The flow, with one
+embed worker that isn't pinned, made 159 texts/s; Ray Data with one actor
+of 4 threads made 72.5. These two settings aren't comparable, since the
+flow's embed worker could use all 16 threads; PR 3 pins both.
+
 ## Not in this plan
 
 - The sharing bar, and groups on a pool of several machines.
