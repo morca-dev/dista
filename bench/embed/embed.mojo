@@ -36,7 +36,8 @@ Settings come from flags or the environment: `--texts` or EMBED_TEXTS,
 group: the reads and the writes), `--embed-workers` or EMBED_GROUP_WORKERS
 (E, workers in group `embed`), `--check=0` (no check) and `--corrupt=1`
 (one wrong value, which the check must catch); each flag's variable is its
-name in capitals after EMBED_.
+name in capitals after EMBED_. EMBED_PIN (Linux only) pins each embed worker
+to a set of CPUs, such as `0-3/4-7` for E=2 (`parse_pin`).
 """
 
 from std.ffi import c_int, external_call
@@ -417,19 +418,63 @@ def _clear(dir: String) raises:
 
 
 @fieldwise_init
+struct HeadPeaks(Copyable, Movable):
+    """The largest of the head's counts (`Runtime.stats`), asked about once
+    a second while the flow ran, and how often it was asked."""
+
+    var objects: Int
+    """Objects with a live reference."""
+    var results: Int
+    """Small results kept at the head."""
+    var located: Int
+    """Results the head knows live on a worker."""
+    var pending: Int
+    """Tasks queued or waiting on inputs."""
+    var samples: Int
+
+
+@fieldwise_init
 struct FlowOutput(Movable):
     var written: List[Written]
     var stats: FlowStats
     var seconds: Float64
     var procs: List[Proc]
     """The head's and the workers' peaks, when `Cluster` started them."""
+    var head: HeadPeaks
 
 
-def _spawn(log: String) raises -> Int:
+def parse_pin(spec: String) raises -> List[List[Int]]:
+    """EMBED_PIN's CPU sets, one per embed worker, separated by `/`; each is
+    CPUs and ranges separated by commas, such as `0-3/4-7` or
+    `0,1,8,9/2,3,10,11`. An empty `spec` pins nothing."""
+    var out = List[List[Int]]()
+    if spec.byte_length() == 0:
+        return out^
+    for part in spec.split("/"):
+        var cpus = List[Int]()
+        for item in String(part).split(","):
+            var r = String(item).split("-")
+            var lo = Int(String(r[0]))
+            var hi = Int(String(r[len(r) - 1]))
+            if lo < 0 or hi < lo or hi >= 1024:
+                raise Error("EMBED_PIN: bad CPU range ", item)
+            for c in range(lo, hi + 1):
+                cpus.append(c)
+        out.append(cpus^)
+    return out^
+
+
+def _spawn(log: String, cpus: List[Int] = List[Int]()) raises -> Int:
     """Starts this binary again, as a new process with this one's
-    environment, its output to `log`; its pid. The child runs only
-    async-signal-safe calls between `fork` and `exec`, so it doesn't matter
-    that this process has threads."""
+    environment, its output to `log`; its pid. With `cpus` (Linux only) the
+    child is pinned to them with `sched_setaffinity` before `exec`, so the
+    Mojo runtime sizes its CPU pool to them when the new process starts.
+    The child runs only async-signal-safe calls between `fork` and `exec`,
+    so it doesn't matter that this process has threads."""
+    # A cpu_set_t of 1,024 CPUs, as glibc's.
+    var mask = List[UInt64](length=16, fill=0)
+    for c in cpus:
+        mask[c // 64] |= UInt64(1) << UInt64(c % 64)
     var prog = String(argv()[0])
     var cprog = prog.as_c_string_span()
     var path = log.copy()
@@ -447,6 +492,11 @@ def _spawn(log: String) raises -> Int:
         )
         _ = external_call["dup2", c_int](fd, c_int(1))
         _ = external_call["dup2", c_int](fd, c_int(2))
+        comptime if CompilationTarget.is_linux():
+            if len(cpus) > 0:
+                _ = external_call["sched_setaffinity", c_int](
+                    c_int(0), Int(128), mask.unsafe_ptr()
+                )
         _ = external_call["execv", c_int](cprog, args.unsafe_ptr())
         external_call["_exit", NoneType](c_int(127))
     return pid
@@ -495,12 +545,27 @@ struct Cluster(Movable):
         self.pids.append(_spawn(head_log))
         self.roles.append("head")
         var head = String("127.0.0.1:", _head_port(head_log))
+        var pin = parse_pin(getenv("EMBED_PIN"))
+        if len(pin) > 0:
+            comptime if not CompilationTarget.is_linux():
+                raise Error("EMBED_PIN: CPU affinity is set on Linux only")
+            if len(pin) != s.group_workers:
+                raise Error(
+                    "EMBED_PIN names ",
+                    len(pin),
+                    " CPU sets, for E=",
+                    s.group_workers,
+                    " embed workers",
+                )
         _ = setenv("DISTA_ROLE", "worker")
         _ = setenv("DISTA_HEAD", head)
         for k in range(s.workers + s.group_workers):
             var group = String("embed") if k >= s.workers else String()
             _ = setenv("DISTA_GROUP", group)
-            self.pids.append(_spawn(String(logs, "/worker-", k, ".log")))
+            var cpus = List[Int]()
+            if k >= s.workers and len(pin) > 0:
+                cpus = pin[k - s.workers].copy()
+            self.pids.append(_spawn(String(logs, "/worker-", k, ".log"), cpus))
             self.roles.append(
                 String("worker in group embed") if k
                 >= s.workers else String("worker in no group")
@@ -582,6 +647,8 @@ def _drive(
     var t0 = perf_counter_ns()
     var run = EmbedFlow.start(rt, files^)
     var written = List[Written]()
+    var head = HeadPeaks(0, 0, 0, 0, 0)
+    var asked = t0
     while True:
         var r = run.next(rt)
         if not r:
@@ -589,8 +656,16 @@ def _drive(
         var refs = r.take().take_refs()
         for k in range(len(refs)):
             written.append(rt.take(refs[k]))
+        if perf_counter_ns() - asked >= 1_000_000_000:
+            asked = perf_counter_ns()
+            var h = rt.stats()
+            head.objects = max(head.objects, h.objects)
+            head.results = max(head.results, h.results)
+            head.located = max(head.located, h.located)
+            head.pending = max(head.pending, h.pending)
+            head.samples += 1
     var secs = _seconds(t0)
-    return FlowOutput(written^, run.stats(), secs, List[Proc]())
+    return FlowOutput(written^, run.stats(), secs, List[Proc](), head^)
 
 
 # ---------------------------------------------------------------- the check
@@ -932,6 +1007,12 @@ def run_mode(s: Settings) raises:
     var names: List[String] = ["Read", "MapWith", "Map"]
     for k in range(len(out.stats.ops)):
         print(t"  operator {k} ({names[k]}): {out.stats.ops[k]}")
+    print(
+        t"  head, largest of {out.head.samples} samples about a second apart:"
+        t" {out.head.objects} live objects, {out.head.results} results kept,"
+        t" {out.head.located} located on workers, {out.head.pending} tasks"
+        t" pending"
+    )
     print(
         t"  peak RSS (getrusage, before the check): driver {_r(driver, 1)} MB,"
         t" largest child {_r(children, 1)} MB"

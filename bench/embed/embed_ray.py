@@ -29,8 +29,11 @@ EMBED_THREADS (T, PyTorch threads and Ray CPUs per actor, default 4),
 `--cpus` or EMBED_CPUS (Ray's CPUs, default E * T + 2: two more for the
 reads and the writes, as `embed.mojo` has K = 2 workers for them),
 `--batch` or EMBED_BATCH (32), `--ray-tmp` or EMBED_RAY_TMP (Ray's temp
-directory; its socket paths must stay under about 104 bytes on macOS) and
-`--corrupt=1` (one wrong value, which the check must catch).
+directory; its socket paths must stay under about 104 bytes on macOS),
+`--corrupt=1` (one wrong value, which the check must catch) and `--pin` or
+EMBED_PIN (Linux only: one CPU set per actor, as `embed.mojo` takes it,
+such as `0-3/4-7`; each actor takes a free set when it starts and pins
+every thread of its process to it, before PyTorch starts its threads).
 """
 
 import glob
@@ -84,6 +87,68 @@ class Settings:
         self.batch = int(setting("EMBED_BATCH", "batch", "32"))
         self.ray_tmp = setting("EMBED_RAY_TMP", "ray-tmp", "")
         self.corrupt = setting("EMBED_CORRUPT", "corrupt", "0") == "1"
+        self.pin = parse_pin(setting("EMBED_PIN", "pin", ""))
+        if self.pin and len(self.pin) != self.embed_workers:
+            sys.exit(
+                f"embed_ray: EMBED_PIN names {len(self.pin)} CPU sets, for"
+                f" E={self.embed_workers} actors"
+            )
+        if self.pin and not hasattr(os, "sched_setaffinity"):
+            sys.exit("embed_ray: EMBED_PIN: CPU affinity is set on Linux only")
+
+
+def parse_pin(spec):
+    """CPU sets separated by `/`, each CPUs and ranges separated by commas,
+    as `embed.mojo`'s `parse_pin` reads them; [] for ""."""
+    out = []
+    for part in filter(None, spec.split("/")):
+        cpus = []
+        for item in part.split(","):
+            lo, _, hi = item.partition("-")
+            cpus.extend(range(int(lo), int(hi or lo) + 1))
+        out.append(cpus)
+    return out
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def claim_cpus(pin, out):
+    """Takes the first CPU set in `pin` that no live actor holds (a file
+    OUT/slots/slot-<k> holding its pid, so that an actor restarted after a
+    kill takes the set its dead one held), and pins every thread of this
+    process to it. Returns the set's index and its CPUs."""
+    dir = os.path.join(out, "slots")
+    me = str(os.getpid())
+    for _ in range(100):
+        for k in range(len(pin)):
+            path = os.path.join(dir, f"slot-{k}")
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                with open(path) as f:
+                    holder = f.read().strip()
+                if holder and _alive(int(holder)):
+                    continue
+                tmp = f"{path}.{me}"
+                with open(tmp, "w") as f:
+                    f.write(me)
+                os.replace(tmp, path)
+            else:
+                os.write(fd, me.encode())
+                os.close(fd)
+            for tid in os.listdir("/proc/self/task"):
+                os.sched_setaffinity(int(tid), pin[k])
+            return k, pin[k]
+        time.sleep(0.1)
+    raise RuntimeError(f"embed_ray: no free CPU set in {pin}")
 
 
 def corpus_files(dir):
@@ -210,14 +275,17 @@ class Embed:
     the batches with the corpus's row groups and report the actors' peaks;
     the load writes OUT/loads/load-<pid> with its seconds."""
 
-    def __init__(self, model_dir, threads, stub, out, corrupt):
+    def __init__(self, model_dir, threads, stub, out, corrupt, pin):
         _quiet()
         t0 = time.perf_counter()
+        slot, cpus = claim_cpus(pin, out) if pin else (-1, [])
         self.model = None if stub else load_model(model_dir, threads)
         self.corrupt = corrupt
         self.log = os.path.join(out, "batches", f"{os.getpid()}.txt")
         with open(os.path.join(out, "loads", f"load-{os.getpid()}"), "w") as f:
             f.write(f"{time.perf_counter() - t0}")
+            if pin:
+                f.write(f" {slot} {','.join(map(str, cpus))}")
 
     def __call__(self, batch):
         ids = batch.column("id").to_numpy()
@@ -251,7 +319,7 @@ def run_mode(s):
             " or use --stub=1"
         )
     out = os.path.abspath(s.out)
-    for sub in ("vectors", "batches", "loads"):
+    for sub in ("vectors", "batches", "loads", "slots"):
         _clear(os.path.join(out, sub))
     texts = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
     groups = row_groups(files)
@@ -280,7 +348,7 @@ def run_mode(s):
         # before Ray 2.51 deprecated it: E actors, each holding T CPUs.
         ds = ds.map_batches(
             Embed,
-            fn_constructor_args=(s.model, s.threads, s.stub, out, s.corrupt),
+            fn_constructor_args=(s.model, s.threads, s.stub, out, s.corrupt, s.pin),
             batch_size=s.batch,
             batch_format="pyarrow",
             compute=ray.data.ActorPoolStrategy(size=s.embed_workers),
@@ -302,23 +370,27 @@ def run_mode(s):
         f" {rows / secs:.1f} texts/s (the model's load included;"
         f" ray.init {init_s:.2f} s before it, not included)"
     )
-    batches, odd, peaks = 0, 0, {}
+    batches, odd, peaks, distinct = 0, 0, {}, set()
     for log in sorted(glob.glob(os.path.join(out, "batches", "*.txt"))):
         pid = os.path.basename(log)[:-4]
         with open(log) as f:
             for line in f:
                 first, n, consecutive, peak = line.split()
                 batches += 1
+                distinct.add((int(first), int(n)))
                 if consecutive != "1" or (int(first), int(n)) not in groups:
                     odd += 1
                 peaks[pid] = max(peaks.get(pid, 0.0), float(peak))
     print(
         f"  batches: {batches}, of which {batches - odd} are corpus row groups"
-        f" and {odd} are not (the corpus has {len(groups)})"
+        f" and {odd} are not (the corpus has {len(groups)}); {len(distinct)}"
+        f" distinct, so {batches - len(distinct)} embedded again"
     )
     for name in sorted(os.listdir(os.path.join(out, "loads"))):
         with open(os.path.join(out, "loads", name)) as f:
-            print(f"  state loaded: pid {name[5:]}, in {float(f.read()):.2f} s")
+            parts = f.read().split()
+        pinned = f", CPU set {parts[1]}: {parts[2]}" if len(parts) > 2 else ""
+        print(f"  state loaded: pid {name[5:]}, in {float(parts[0]):.2f} s{pinned}")
     print(f"  peak RSS (getrusage): driver {_peak_mb():.1f} MB")
     for pid, peak in sorted(peaks.items()):
         print(f"    embed actor (pid {pid}): {peak:.1f} MB")
