@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`bench/embed`:** an embedding job as a flow, with its corpus, a stub encoder and a single-process check, in a new `embed` environment (`pixi run -e embed bench-embed`).
+- **`bench/embed`:** the same job on Ray Data (`pixi run -e ray bench-embed-ray`), and `bench-embed check`, which checks any output directory.
 
 ## [0.7.0] - 2026-11-27
 

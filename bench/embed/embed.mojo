@@ -3,6 +3,7 @@
     ./build/bench-embed corpus     # write the corpus
     ./build/bench-embed run        # the corpus if missing, the flow, the check
     ./build/bench-embed encode     # the encoder alone, in this process
+    ./build/bench-embed check --out=DIR   # any output directory, such as Ray's
 
 The flow reads one corpus file per input and emits one batch of 32 texts per
 item, embeds each batch in a `StatefulTask` of the group `embed` that holds
@@ -22,7 +23,9 @@ files the flow's results name.
 
 Each run checks itself: one process embeds the same files in the same
 batches with the same encoder, and every row's id must come back exactly
-once, its vector within `TOLERANCE` of that process's.
+once, its vector within `TOLERANCE` of that process's. The `check` mode
+does the same for any output directory of this layout, such as the one
+`embed_ray.py` writes, matching rows by id.
 
 The head and the workers are new processes of this binary (`Cluster`), not
 the local mode's forks, in which the encoder's `parallelize` can't run.
@@ -40,7 +43,7 @@ from std.ffi import c_int, external_call
 from std.memory import bitcast
 from std.math import sqrt
 from std.os import getenv, listdir, makedirs, remove, setenv, unsetenv
-from std.os.path import exists
+from std.os.path import exists, isdir
 from std.sys import argv, size_of
 from std.sys.info import CompilationTarget
 from std.time import perf_counter_ns, sleep
@@ -60,6 +63,13 @@ comptime DIM = 384
 comptime TOLERANCE: Float32 = 1e-5
 """The largest difference allowed between a value of the flow's vectors and
 the single process's. The vectors have unit length."""
+comptime STUB_TOLERANCE: Float32 = 1e-6
+"""`check`'s default with the stub, whose vectors embed_ray.py computes the
+same way, to the bit."""
+comptime CROSS_TOLERANCE: Float32 = 1e-5
+"""`check`'s default with the model: the vectors may come from another
+kernel, such as PyTorch's, whose largest difference from encoder.mojo's on
+20,000 texts was 5.1e-7 (README, "Ray Data")."""
 
 
 # ---------------------------------------------------------------- settings
@@ -694,6 +704,160 @@ def check(s: Settings, files: List[String], written: List[Written]) raises:
     )
 
 
+def _parquet_under(dir: String, mut out: List[String]) raises:
+    """Every `*.parquet` file under `dir`, at any depth, in name order."""
+    var names = List[String]()
+    for name in listdir(dir):
+        names.append(name)
+    sort(names)
+    for name in names:
+        var path = String(dir, "/", name)
+        if isdir(path):
+            _parquet_under(path, out)
+        elif name.endswith(".parquet") and not name.startswith("."):
+            out.append(path^)
+
+
+def _column(b: RecordBatch, name: String) raises -> Int:
+    for i in range(b.num_columns()):
+        if b.name(i) == name:
+            return i
+    raise Error("no column ", name)
+
+
+def _output_file(path: String) raises -> Tuple[List[Int64], List[Float32]]:
+    """An output file's `id` and `vector` columns, found by name, the
+    vectors flattened. Any writer's file will do: each row's offsets are
+    followed, and each vector must be `DIM` float32 values."""
+    var r = ParquetReader.open(path)
+    var t = r.read_table()
+    var ids = List[Int64]()
+    var values = List[Float32]()
+    for b in t.batches:
+        ids.extend(b.column_i64(_column(b, "id"))[0].copy())
+        ref a = b.column(_column(b, "vector"))
+        if a.type.id != AT_BINARY or a.null_count > 0:
+            raise Error(path, ": `vector` isn't a binary column without nulls")
+        var bytes = Span(a.values)
+        for i in range(a.length):
+            var start = Int(a.offsets[i])
+            if Int(a.offsets[i + 1]) - start != DIM * 4:
+                raise Error(
+                    path, ": row ", i, " isn't ", DIM, " float32 values"
+                )
+            for k in range(start, start + DIM * 4, 4):
+                var bits = (
+                    UInt32(bytes[k])
+                    | (UInt32(bytes[k + 1]) << 8)
+                    | (UInt32(bytes[k + 2]) << 16)
+                    | (UInt32(bytes[k + 3]) << 24)
+                )
+                values.append(bitcast[DType.float32](bits))
+    return (ids^, values^)
+
+
+def check_mode(s: Settings) raises:
+    """Checks any output directory (`--out`) against one process embedding
+    the corpus (`--corpus`) a row group at a time, with encoder.mojo or the
+    stub: every `*.parquet` file under it, whatever its name, is read, every
+    corpus id must appear exactly once and nothing else, and every value
+    must be within `--tolerance` of the single process's. The default
+    tolerance is `STUB_TOLERANCE` with the stub and `CROSS_TOLERANCE` with
+    the model, which allows for another kernel such as PyTorch's. Prints
+    the largest difference and the smallest cosine; raises on the first
+    value out of tolerance."""
+    var tol_flag = setting(
+        "EMBED_TOLERANCE",
+        "tolerance",
+        String(STUB_TOLERANCE) if s.stub else String(CROSS_TOLERANCE),
+    )
+    var tolerance = Float32(atof(tol_flag))
+    var t0 = perf_counter_ns()
+    var state = open_encoder()
+    var want = List[Float32]()
+    var row = Dict[Int, Int]()
+    for path in corpus_files(s.corpus):
+        for t in read_batches(path):
+            for id in t.ids.items:
+                if Int(id) in row:
+                    raise Error("check: the corpus has id ", id, " twice")
+                row[Int(id)] = len(row)
+            want.extend(state.encode(t.texts.items))
+    var embed_s = _seconds(t0)
+    var outputs = List[String]()
+    _parquet_under(s.out, outputs)
+    if len(outputs) == 0:
+        raise Error("check: no .parquet files under ", s.out)
+    var seen = List[Bool](length=len(row), fill=False)
+    var count = 0
+    var worst: Float32 = 0
+    var least_cos: Float64 = 1.0
+    for path in outputs:
+        var got = _output_file(path)
+        ref ids = got[0]
+        ref values = got[1]
+        for i in range(len(ids)):
+            var id = Int(ids[i])
+            if id not in row:
+                raise Error(
+                    "check: ", path, " has id ", id, ", not in the corpus"
+                )
+            var j = row[id]
+            if seen[j]:
+                raise Error("check: id ", id, " comes back twice")
+            seen[j] = True
+            count += 1
+            var dot: Float64 = 0
+            var na: Float64 = 0
+            var nb: Float64 = 0
+            for k in range(DIM):
+                var g = values[i * DIM + k]
+                var w = want[j * DIM + k]
+                var d = abs(g - w)
+                worst = max(worst, d)
+                if d > tolerance:
+                    raise Error(
+                        "check: id ",
+                        id,
+                        " value ",
+                        k,
+                        " is ",
+                        g,
+                        " in ",
+                        path,
+                        ", one process makes ",
+                        w,
+                        " (difference ",
+                        d,
+                        ", tolerance ",
+                        tolerance,
+                        ")",
+                    )
+                dot += Float64(g) * Float64(w)
+                na += Float64(g) * Float64(g)
+                nb += Float64(w) * Float64(w)
+            least_cos = min(least_cos, dot / sqrt(na * nb))
+    if count != len(row):
+        for e in row.items():
+            if not seen[e.value]:
+                raise Error(
+                    "check: ",
+                    len(row) - count,
+                    " of the corpus's ",
+                    len(row),
+                    " ids are missing, id ",
+                    e.key,
+                    " among them",
+                )
+    print(
+        t"check: passed, {count} ids once each in {len(outputs)} files under"
+        t" {s.out}, largest difference {worst}, smallest cosine {least_cos}"
+        t" (tolerance {tolerance}, {'stub' if s.stub else 'model'});"
+        t" {_r(embed_s, 2)} s to embed the corpus, {_r(_seconds(t0), 2)} s"
+        t" in all"
+    )
+
+
 # ---------------------------------------------------------------- the modes
 
 
@@ -838,7 +1002,9 @@ def main() raises:
         run_mode(s)
     elif mode == "encode":
         encode_mode(s)
+    elif mode == "check":
+        check_mode(s)
     else:
         raise Error(
-            "bench-embed: the mode is corpus, run or encode, not ", mode
+            "bench-embed: the mode is corpus, run, encode or check, not ", mode
         )
