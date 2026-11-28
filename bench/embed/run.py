@@ -432,6 +432,7 @@ def main():
     p.add_argument("--results", required=True)
     p.add_argument("--tag", default="", help="a note for the row")
     p.add_argument("--keep", default="", help="move the output here afterwards")
+    p.add_argument("--timeout", type=float, default=7200, help="seconds; 0 for none")
     a = p.parse_args()
 
     results = os.path.abspath(a.results)
@@ -472,7 +473,16 @@ def main():
             killer = threading.Thread(
                 target=kill_one, args=(a, out, proc, t0, proc.pid, note), daemon=True)
             killer.start()
-        _, status, usage = os.wait4(proc.pid, 0)
+        while True:
+            pid, status, usage = os.wait4(proc.pid, os.WNOHANG)
+            if pid:
+                break
+            if a.timeout and time.monotonic() - t0 > a.timeout:
+                # Every process of the job, by the pids sampled from its tree.
+                note["kill"] = (note.get("kill", "") + f" timed out after {a.timeout} s").strip()
+                for pid in _tree(_proc_table(), proc.pid):
+                    os.kill(pid, signal.SIGKILL)
+            time.sleep(0.2)
         proc.returncode = os.waitstatus_to_exitcode(status)
         wall = time.monotonic() - t0
         sampler.stop()
